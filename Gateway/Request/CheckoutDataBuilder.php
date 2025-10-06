@@ -15,6 +15,7 @@ use Adyen\Payment\Helper\Config;
 use Adyen\Payment\Helper\PaymentMethods;
 use Adyen\Payment\Helper\StateData;
 use Adyen\Payment\Model\Config\Source\ThreeDSFlow;
+use Adyen\Payment\Model\Ui\AdyenCcConfigProvider;
 use Adyen\Payment\Model\Ui\AdyenPayByLinkConfigProvider;
 use Adyen\Payment\Observer\AdyenCcDataAssignObserver;
 use Adyen\Payment\Observer\AdyenPaymentMethodDataAssignObserver;
@@ -89,16 +90,6 @@ class CheckoutDataBuilder implements BuilderInterface
                 $this->configHelper->getAutoCaptureOpenInvoice($storeId)) {
                 $requestBody['captureDelayHours'] = 0;
             }
-
-            if (str_contains($payment->getMethod(), PaymentMethods::KLARNA) ||
-                $payment->getMethod() === AdyenPayByLinkConfigProvider::CODE
-            ) {
-                $otherDeliveryInformation = $this->getOtherDeliveryInformation($order);
-                if (isset($otherDeliveryInformation)) {
-                    $requestBody['additionalData']['openinvoicedata.merchantData'] =
-                        base64_encode(json_encode($otherDeliveryInformation));
-                }
-            }
         }
 
         // Ratepay specific Fingerprint
@@ -132,24 +123,24 @@ class CheckoutDataBuilder implements BuilderInterface
         $numberOfInstallments = $payment->getAdditionalInformation(
             AdyenCcDataAssignObserver::NUMBER_OF_INSTALLMENTS
         ) ?: 0;
-        $comboCardType = $payment->getAdditionalInformation(AdyenCcDataAssignObserver::COMBO_CARD_TYPE);
         if ($numberOfInstallments > 0) {
             $requestBody['installments']['value'] = $numberOfInstallments;
         }
 
-        /*
-         * if the combo card type is debit then add the funding source
-         * and unset the installments & brand fields
-         */
-        if (!empty($comboCardType)) {
+        $comboCardType = $payment->getAdditionalInformation(AdyenCcDataAssignObserver::COMBO_CARD_TYPE);
+        if (!empty($comboCardType) && strcmp($payment->getMethod(), AdyenCcConfigProvider::CODE) === 0) {
             switch ($comboCardType) {
-                case 'debit':
-                    $requestBody['paymentMethod']['fundingSource'] = 'debit';
-                    unset($requestBody['paymentMethod']['brand']);
-                    unset($requestBody['installments']);
+                case PaymentMethods::FUNDING_SOURCE_DEBIT:
+                    // Remove installments if the fundingSource is debit and the country code is Brazil
+                    if (strcmp($order->getBillingAddress()->getCountryId(), 'BR') === 0) {
+                        unset($requestBody['paymentMethod']['brand']);
+                        unset($requestBody['installments']);
+                    }
+
+                    $requestBody['paymentMethod']['fundingSource'] = $comboCardType;
                     break;
-                case 'credit':
-                    $requestBody['paymentMethod']['fundingSource'] = 'credit';
+                case PaymentMethods::FUNDING_SOURCE_CREDIT:
+                    $requestBody['paymentMethod']['fundingSource'] = $comboCardType;
                     break;
             }
         }
@@ -163,29 +154,6 @@ class CheckoutDataBuilder implements BuilderInterface
         return [
             'body' => $requestBody
         ];
-    }
-
-    /**
-     * @param Order $order
-     * @return array|null
-     */
-    private function getOtherDeliveryInformation(Order $order): ?array
-    {
-        $shippingAddress = $order->getShippingAddress();
-
-        if ($shippingAddress) {
-            $otherDeliveryInformation = [
-                "shipping_method" => $order->getShippingMethod(),
-                "first_name" => $order->getCustomerFirstname(),
-                "last_name" => $order->getCustomerLastname(),
-                "street_address" => implode(' ', $shippingAddress->getStreet()),
-                "postal_code" => $shippingAddress->getPostcode(),
-                "city" => $shippingAddress->getCity(),
-                "country" => $shippingAddress->getCountryId()
-            ];
-        }
-
-        return $otherDeliveryInformation ?? null;
     }
 
     /**
