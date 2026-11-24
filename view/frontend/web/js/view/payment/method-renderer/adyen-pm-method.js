@@ -22,6 +22,7 @@ define(
         'Adyen_Payment/js/model/adyen-payment-modal',
         'Adyen_Payment/js/model/adyen-checkout',
         'Adyen_Payment/js/model/payment-component-states',
+        'Adyen_Payment/js/helper/disclaimerHelper',
     ],
     function(
         ko,
@@ -36,7 +37,8 @@ define(
         adyenConfiguration,
         adyenPaymentModal,
         adyenCheckout,
-        paymentComponentStates
+        paymentComponentStates,
+        disclaimerHelper
     ) {
         'use strict';
 
@@ -78,6 +80,42 @@ define(
                     self.enablePaymentMethod(paymentMethodsObserver());
                 }
 
+                // Seed the baseline from the current total so the first totals emission doesn't trigger
+                // a rebuild that races with the initial mount and can leave wallet buttons unrendered.
+                // A missing/null total is treated as "no baseline yet", consistent with the guard below.
+                const initialTotals = quote.totals();
+                this._lastGrandTotal = (initialTotals && initialTotals.grand_total !== null) ? initialTotals.grand_total : undefined;
+
+                // This event is triggered when the total changes or billing address is added (virtual products)
+                quote.totals.subscribe(function (totals) {
+                    if (!totals) {
+                        return;
+                    }
+                    const newGrandTotal = totals.grand_total;
+                    // Ignore emissions without a usable total so a transient empty/cleared totals
+                    // object can't corrupt the baseline and suppress a later legitimate rebuild.
+                    if (newGrandTotal === undefined || newGrandTotal === null) {
+                        return;
+                    }
+                    const previousGrandTotal = self._lastGrandTotal;
+
+                    if (Number(newGrandTotal) === Number(previousGrandTotal)) {
+                        return;
+                    }
+
+                    self._lastGrandTotal = newGrandTotal;
+
+                    // Establish the baseline on the first total without rebuilding.
+                    if (typeof previousGrandTotal === 'undefined') {
+                        return;
+                    }
+
+                    // Rebuild component with updated configuration
+                    if (self.isChecked() === self.getCode()) {
+                        self.rebuildComponentAfterAmountChange();
+                    }
+                });
+
                 paymentComponentStates().initializeState(this.getMethodCode());
             },
 
@@ -97,7 +135,7 @@ define(
             },
 
             enablePaymentMethod: function (paymentMethodsResponse) {
-                if (!!paymentMethodsResponse.paymentMethodsResponse) {
+                if (this.checkBrowserCompatibility() && !!paymentMethodsResponse.paymentMethodsResponse) {
                     this.paymentMethod(
                         adyenPaymentService.getPaymentMethodFromResponse(
                             this.getTxVariant(),
@@ -130,6 +168,22 @@ define(
                 return true;
             },
 
+            rebuildComponentAfterAmountChange: function () {
+                // Unmount existing component if present
+                if (this.paymentComponent && typeof this.paymentComponent.unmount === 'function') {
+                    try {
+                        this.paymentComponent.unmount();
+                    } catch (e) {
+                        console.warn('Failed to unmount Adyen component:', e);
+                    }
+                }
+                this.paymentComponent = null;
+                this.checkoutComponent = null;
+
+                // Force re-create component with updated configuration
+                this.createCheckoutComponent(true);
+            },
+
             /*
              * Pre-selected payment methods don't trigger parent's `selectPaymentMethod()` function.
              *
@@ -144,20 +198,24 @@ define(
 
             // Build AdyenCheckout library and creates the payment method component
             createCheckoutComponent: async function(forceCreate = false) {
-                if (!this.checkoutComponent || forceCreate) {
-                    const paymentMethodsResponse = adyenPaymentService.getPaymentMethods();
-                    const countryCode = quote.billingAddress().countryId;
+                const billingAddressObservable = quote.billingAddress;
+                let self = this;
 
-                    this.checkoutComponent = await adyenCheckout.buildCheckoutComponent(
-                        paymentMethodsResponse(),
-                        countryCode,
-                        this.handleOnAdditionalDetails.bind(this),
-                        this.handleOnCancel.bind(this),
-                        this.handleOnSubmit.bind(this),
-                        this.handleOnError.bind(this)
-                    );
+                if (billingAddressObservable() && billingAddressObservable().countryId) {
+                    if (!this.checkoutComponent || forceCreate) {
+                        const paymentMethodsResponse = adyenPaymentService.getPaymentMethods();
 
-                    this.renderCheckoutComponent();
+                        this.checkoutComponent = await adyenCheckout.buildCheckoutComponent(
+                            paymentMethodsResponse(),
+                            billingAddressObservable().countryId,
+                            this.handleOnAdditionalDetails.bind(this),
+                            this.handleOnCancel.bind(this),
+                            this.handleOnSubmit.bind(this),
+                            this.handleOnError.bind(this)
+                        );
+
+                        this.renderCheckoutComponent();
+                    }
                 }
             },
 
@@ -166,7 +224,6 @@ define(
             },
 
             handleOnFailure: function(error, component) {
-
                 paymentComponentStates().setIsPlaceOrderAllowed(this.getMethodCode(), true);
 
                 fullScreenLoader.stopLoader();
@@ -199,13 +256,22 @@ define(
                     {
                         showPayButton: showPayButton,
                         countryCode: formattedShippingAddress.country ? formattedShippingAddress.country : formattedBillingAddress.country, // Use shipping address details as default and fall back to billing address if missing
-                        data: {},
                         onChange: function (state) {
                             paymentComponentStates().setIsPlaceOrderAllowed(self.getMethodCode(), state.isValid);
                         },
                         onSubmit: this.handleOnSubmit.bind(this),
                         onError: this.handleOnError.bind(this)
                     });
+
+                if (adyenConfiguration.getOpenInvoicePaymentMethods().includes(self.getMethodCode())) {
+                    const disclaimerMessage = disclaimerHelper.buildDisclaimerMessage(
+                        adyenConfiguration.getBnplDisclaimer()
+                    );
+
+                    if (disclaimerMessage) {
+                        configuration.disclaimerMessage = disclaimerMessage;
+                    }
+                }
 
                 return configuration;
             },
@@ -251,60 +317,57 @@ define(
             },
 
             handleOnAdditionalDetails: function(state, component, actions) {
-                const self = this;
                 adyenPaymentModal.hideModalLabel(this.modalLabel);
                 fullScreenLoader.startLoader();
-                // call endpoint with state.data if available
-                let request = {};
-                if (!!state.data) {
-                    request = state.data;
-                }
 
-                adyenPaymentService.paymentDetails(request, self.orderId).done(function(responseJSON) {
-                    if (!!actions) {
-                        const response = JSON.parse(responseJSON);
-                        actions.resolve({resultCode: response.resultCode});
-                    }
+                this.handlePaymentsDetails(state.data, actions);
+            },
 
-                    $.mage.redirect(
-                        window.checkoutConfig.payment.adyen.successPage,
-                    );
+            handlePaymentsDetails: function (request, actions = null) {
+                const self = this;
+
+                adyenPaymentService.paymentDetails(request, self.orderId).done(function(responseJson) {
+                    self.handlePaymentsDetailsResponse(responseJson, actions)
                 }).fail(function(response) {
-                    if (!!actions) {
-                        actions.reject();
-                    }
-
-                    fullScreenLoader.stopLoader();
-                    if (self.popupModal) {
-                        self.closeModal(self.popupModal);
-                    }
-                    errorProcessor.process(response,
-                        self.currentMessageContainer);
-                    paymentComponentStates().setIsPlaceOrderAllowed(self.getMethodCode(), true);
+                    self.handleFailingPaymentsDetailsResponse(actions)
+                    errorProcessor.process(response, self.currentMessageContainer);
                 });
             },
 
-            handleOnCancel: function(state, component) {
-                const self = this;
+            handlePaymentsDetailsResponse: function (responseJSON, actions = null) {
+                const response = JSON.parse(responseJSON);
 
-                // call endpoint with state.data if available
-                let request = {};
-                if (!!state.data) {
-                    request = state.data;
+                if (!!response.isFinal) {
+                    if (['Authorised', 'Received', 'PresentToShopper'].includes(response.resultCode)) {
+                        if (!!actions) {
+                            actions.resolve({resultCode: response.resultCode});
+                        }
+
+                        $.mage.redirect(
+                            window.checkoutConfig.payment.adyen.successPage,
+                        );
+                    } else {
+                        errorProcessor.process({responseText: responseJSON}, this.currentMessageContainer);
+                        this.handleFailingPaymentsDetailsResponse(actions);
+                    }
+                }
+            },
+
+            handleFailingPaymentsDetailsResponse: function (actions = null) {
+                if (!!actions) {
+                    actions.reject();
                 }
 
-                adyenPaymentService.paymentDetails(request, self.orderId).done(function() {
-                    $.mage.redirect(
-                        window.checkoutConfig.payment.adyen.successPage
-                    );
-                }).fail(function(response) {
-                    fullScreenLoader.stopLoader();
-                    if (self.popupModal) {
-                        self.closeModal(self.popupModal);
-                    }
-                    errorProcessor.process(response, self.currentMessageContainer);
-                    paymentComponentStates().setIsPlaceOrderAllowed(self.getMethodCode(), true);
-                });
+                fullScreenLoader.stopLoader();
+                if (this.popupModal) {
+                    this.closeModal(this.popupModal);
+                }
+
+                paymentComponentStates().setIsPlaceOrderAllowed(this.getMethodCode(), true);
+            },
+
+            handleOnCancel: function(state, component) {
+                this.handlePaymentsDetails(state.data);
             },
 
             placeOrder: function() {
@@ -451,7 +514,8 @@ define(
             },
 
             isButtonActive: function() {
-                return paymentComponentStates().getIsPlaceOrderAllowed(this.getMethodCode());
+                return this.isPlaceOrderActionAllowed() &&
+                    paymentComponentStates().getIsPlaceOrderAllowed(this.getMethodCode());
             },
 
             /**
@@ -516,6 +580,10 @@ define(
                     lastName: address.lastname,
                     telephone: address.telephone
                 };
+            },
+
+            checkBrowserCompatibility: function () {
+                return true;
             },
 
             getPaymentMethodComponent: function () {

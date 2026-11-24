@@ -47,6 +47,18 @@ define(
             },
             getCspNonce: function () {
                 return window.checkoutConfig.payment.adyen.cspNonce;
+            },
+            getVirtualQuotePaymentMethodsResponse: function () {
+                return window.checkoutConfig.payment.adyen.virtualQuote.paymentMethodsResponse;
+            },
+            getVirtualQuoteConnectedTerminals: function () {
+                return window.checkoutConfig.payment.adyen.virtualQuote.connectedTerminals;
+            },
+            getOpenInvoicePaymentMethods: function () {
+                return window.checkoutConfig.payment.adyenPm.openInvoicePaymentMethods;
+            },
+            getBnplDisclaimer: function () {
+                return window.checkoutConfig.payment.adyenPm.bnplDisclaimer;
             }
         };
     },

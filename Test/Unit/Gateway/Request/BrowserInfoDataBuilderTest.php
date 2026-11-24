@@ -5,8 +5,10 @@ namespace Adyen\Payment\Test\Gateway\Request;
 use Adyen\Payment\Gateway\Request\BrowserInfoDataBuilder;
 use Adyen\Payment\Helper\Requests;
 use Adyen\Payment\Test\Unit\AbstractAdyenTestCase;
+use PHPUnit\Framework\Attributes\AllowMockObjectsWithoutExpectations;
 
 
+#[AllowMockObjectsWithoutExpectations]
 class BrowserInfoDataBuilderTest extends AbstractAdyenTestCase
 {
     private $adyenRequestsHelperMock;
@@ -23,13 +25,13 @@ class BrowserInfoDataBuilderTest extends AbstractAdyenTestCase
 
     public function testBuild()
     {
-        $_SERVER['HTTP_USER_AGENT'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)';
-        $_SERVER['HTTP_ACCEPT'] = 'text/html,application/xhtml+xml';
+        $userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)';
+        $httpAccept = 'text/html,application/xhtml+xml';
 
         $browserData = [
             'browserInfo' => [
-                'userAgent' => $_SERVER['HTTP_USER_AGENT'],
-                'acceptHeader' => $_SERVER['HTTP_ACCEPT']
+                'userAgent' => $userAgent,
+                'acceptHeader' => $httpAccept
             ]
         ];
 

@@ -22,6 +22,7 @@ install:
 	bin/magento module:enable Adyen_Payment
 	bin/magento setup:upgrade
 	bin/magento setup:di:compile
+	bin/magento cron:install
 
 # Install developer module
 dev-module:
@@ -47,6 +48,7 @@ configure: n98-magerun2.phar
 	bin/magento config:set payment/adyen_abstract/client_key_test "${ADYEN_CLIENT_KEY}"
 	bin/magento config:set payment/adyen_abstract/notification_username 'admin'
 	bin/magento config:set payment/adyen_abstract/payment_methods_active 1
+	bin/magento config:set payment/adyen_abstract/webhook_notification_processor 'queue'
 	./n98-magerun2.phar config:store:set --encrypt payment/adyen_abstract/notification_password '1234'  > /dev/null
 	./n98-magerun2.phar config:store:set --encrypt payment/adyen_abstract/api_key_test "${ADYEN_API_KEY}" > /dev/null
 
@@ -78,6 +80,14 @@ fs:
 # Production mode
 production:
 	bin/magento deploy:mode:set production
+
+# E2E test setup
+setup-e2e:
+	bin/magento config:set currency/options/allow USD,EUR,NOK
+	mysql -h "$$DB_SERVER" -P "$$DB_PORT" -u "$$DB_USER" -p"$$DB_PASSWORD" "$$DB_NAME" -e \
+		"INSERT INTO $${DB_PREFIX}directory_currency_rate (currency_from, currency_to, rate) VALUES ('EUR', 'NOK', 11) ON DUPLICATE KEY UPDATE rate = VALUES(rate);"
+	bin/magento cache:flush
+# End of E2E test setup
 
 # GraphQL tests
 GRAPHQL_XML_DIST=${MAGENTO_ROOT}/vendor/adyen/module-payment/Test/phpunit_graphql.xml.dist

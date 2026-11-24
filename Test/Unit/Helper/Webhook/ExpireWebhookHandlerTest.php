@@ -17,13 +17,14 @@ use Adyen\Payment\Helper\Order as OrderHelper;
 use Adyen\Payment\Helper\Webhook\ExpireWebhookHandler;
 use Adyen\Payment\Logger\AdyenLogger;
 use Adyen\Payment\Model\AdyenAmountCurrency;
-use Adyen\Payment\Model\Config\Source\CaptureMode;
 use Adyen\Payment\Model\Notification;
 use Adyen\Payment\Test\Unit\AbstractAdyenTestCase;
 use Magento\Sales\Api\Data\OrderInterface;
 use Magento\Sales\Model\Order;
 use PHPUnit\Framework\MockObject\MockObject;
+use PHPUnit\Framework\Attributes\AllowMockObjectsWithoutExpectations;
 
+#[AllowMockObjectsWithoutExpectations]
 class ExpireWebhookHandlerTest extends AbstractAdyenTestCase
 {
     protected ?ExpireWebhookHandler $webhookHandler;
@@ -65,31 +66,8 @@ class ExpireWebhookHandlerTest extends AbstractAdyenTestCase
         $this->webhookHandler = null;
     }
 
-    public function testAutoCaptureEnabled(): void
-    {
-        $this->configMock->expects($this->once())
-            ->method('getCaptureMode')
-            ->willReturn(CaptureMode::CAPTURE_MODE_AUTO);
-
-        $this->adyenLoggerMock->expects($this->once())->method('addAdyenNotification');
-        $this->orderMock->expects($this->once())->method('addCommentToStatusHistory');
-        $this->orderHelperMock->expects($this->never())->method('holdCancelOrder');
-
-        $result = $this->webhookHandler->handleWebhook(
-            $this->orderMock,
-            $this->notificationMock,
-            'pending'
-        );
-
-        $this->assertInstanceOf(OrderInterface::class, $result);
-    }
-
     public function testExpireWebhookIgnored()
     {
-        $this->configMock->expects($this->once())
-            ->method('getCaptureMode')
-            ->willReturn(CaptureMode::CAPTURE_MODE_MANUAL);
-
         $this->configMock->expects($this->once())
             ->method('isExpireWebhookIgnored')
             ->willReturn(true);
@@ -109,10 +87,6 @@ class ExpireWebhookHandlerTest extends AbstractAdyenTestCase
 
     public function testHandleWebhookWithPartialExpiration()
     {
-        $this->configMock->expects($this->once())
-            ->method('getCaptureMode')
-            ->willReturn(CaptureMode::CAPTURE_MODE_MANUAL);
-
         $this->configMock->expects($this->once())
             ->method('isExpireWebhookIgnored')
             ->willReturn(false);
@@ -143,10 +117,6 @@ class ExpireWebhookHandlerTest extends AbstractAdyenTestCase
     public function testHandleWebhookWithShipments()
     {
         $this->configMock->expects($this->once())
-            ->method('getCaptureMode')
-            ->willReturn(CaptureMode::CAPTURE_MODE_MANUAL);
-
-        $this->configMock->expects($this->once())
             ->method('isExpireWebhookIgnored')
             ->willReturn(false);
 
@@ -176,10 +146,6 @@ class ExpireWebhookHandlerTest extends AbstractAdyenTestCase
 
     public function testHandleWebhookSuccessfully()
     {
-        $this->configMock->expects($this->once())
-            ->method('getCaptureMode')
-            ->willReturn(CaptureMode::CAPTURE_MODE_MANUAL);
-
         $this->configMock->expects($this->once())
             ->method('isExpireWebhookIgnored')
             ->willReturn(false);

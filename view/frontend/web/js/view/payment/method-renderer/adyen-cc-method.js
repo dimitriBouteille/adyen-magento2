@@ -53,6 +53,7 @@ define(
             installments: ko.observable(),
             checkoutComponent: null,
             cardComponent: null,
+            detectedBrand: null,
 
             defaults: {
                 template: 'Adyen_Payment/payment/cc-form',
@@ -149,18 +150,28 @@ define(
             },
             // Build AdyenCheckout library and creates the payment method component
             createCheckoutComponent: async function () {
-                if (!this.checkoutComponent) {
-                    const paymentMethodsResponse = adyenPaymentService.getPaymentMethods();
-                    const countryCode = quote.billingAddress().countryId;
+                const billingAddressObservable = quote.billingAddress;
+                let self = this;
 
-                    this.checkoutComponent = await adyenCheckout.buildCheckoutComponent(
-                        paymentMethodsResponse(),
-                        countryCode,
-                        this.handleOnAdditionalDetails.bind(this)
-                    )
+                if (billingAddressObservable() && billingAddressObservable().countryId) {
+                    if (!this.checkoutComponent) {
+                        const paymentMethodsResponse = adyenPaymentService.getPaymentMethods();
+
+                        this.checkoutComponent = await adyenCheckout.buildCheckoutComponent(
+                            paymentMethodsResponse(),
+                            billingAddressObservable().countryId,
+                            this.handleOnAdditionalDetails.bind(this)
+                        )
+                    }
+
+                    this.renderCCPaymentMethod();
+                } else {
+                    billingAddressObservable.subscribe(function (updatedBillingAddress) {
+                        if (updatedBillingAddress && updatedBillingAddress.countryId) {
+                            self.createCheckoutComponent();
+                        }
+                    });
                 }
-
-                this.renderCCPaymentMethod();
             },
             /**
              * Returns true if card details can be stored
@@ -212,6 +223,9 @@ define(
                     onChange: function(state, component) {
                         self.placeOrderAllowed(!!state.isValid);
                         self.storeCc = !!state.data.storePaymentMethod;
+                    },
+                    onBrand: function(state) {
+                        self.detectedBrand = state?.brand;
                     },
                     // Required for Click to Pay
                     onSubmit: function () {
@@ -309,7 +323,7 @@ define(
                     const componentData = this.cardComponent.data;
 
                     data.additional_data.stateData = JSON.stringify(componentData);
-                    data.additional_data.cc_type = componentData.paymentMethod?.brand;
+                    data.additional_data.cc_type = componentData.paymentMethod?.brand ?? this.detectedBrand;
 
                     if (componentData.installments?.value) {
                         data.additional_data.number_of_installments = componentData.installments?.value;
@@ -323,7 +337,6 @@ define(
              * @returns {boolean}
              */
             isButtonActive: function() {
-                // TODO check if isPlaceOrderActionAllowed and placeOrderAllowed are both needed
                 return this.isActive() && this.getCode() == this.isChecked() &&
                     this.isPlaceOrderActionAllowed() &&
                     this.placeOrderAllowed();
@@ -371,18 +384,27 @@ define(
              * Based on the response we can start a 3DS2 validation or place the order
              * @param responseJSON
              */
-            handleAdyenResult: function(responseJSON, orderId) {
-                let self = this;
+            handleAdyenResult: function(responseJSON, orderId, popupModal = null) {
                 let response = JSON.parse(responseJSON);
 
                 if (!!response.isFinal) {
-                    // Status is final redirect to the success page
-                    window.location.replace(url.build(
-                        window.checkoutConfig.payment[quote.paymentMethod().method].successPage
-                    ));
+                    if (['Authorised', 'Received', 'PresentToShopper'].includes(response.resultCode)) {
+                        window.location.replace(url.build(
+                            window.checkoutConfig.payment[quote.paymentMethod().method].successPage
+                        ));
+                    } else {
+                        if (popupModal) {
+                            this.closeModal(popupModal);
+                        }
+
+                        this.messageContainer.addErrorMessage(response);
+                        this.isPlaceOrderActionAllowed(true);
+
+                        fullScreenLoader.stopLoader();
+                    }
                 } else {
                     // Handle action
-                    self.handleAction(response.action, orderId);
+                    this.handleAction(response.action, orderId);
                 }
             },
             handleOnAdditionalDetails: function(result) {
@@ -392,11 +414,11 @@ define(
                 fullScreenLoader.startLoader();
                 let popupModal = self.showModal();
 
-                adyenPaymentService.paymentDetails(request, self.orderId).
-                    done(function(responseJSON) {
-                        self.handleAdyenResult(responseJSON, self.orderId);
-                    }).
-                    fail(function(response) {
+                adyenPaymentService.paymentDetails(request, self.orderId)
+                    .done(function(responseJSON) {
+                        self.handleAdyenResult(responseJSON, self.orderId, popupModal);
+                    })
+                    .fail(function(response) {
                         self.closeModal(popupModal);
                         errorProcessor.process(response, self.messageContainer);
                         self.isPlaceOrderActionAllowed(true);

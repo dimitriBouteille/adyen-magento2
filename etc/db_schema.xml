@@ -105,11 +105,15 @@
     <column xsi:type="varchar" name="merchant_reference" nullable="true" length="255" comment="Merchant reference ID"/>
     <column xsi:type="text" name="result_code" nullable="true" comment="Payment Response Result Code"/>
     <column xsi:type="text" name="response" nullable="true" comment="Payment Response"/>
+    <column xsi:type="timestamp" name="created_at" on_update="false" nullable="false" default="CURRENT_TIMESTAMP" comment="Created at"/>
     <constraint xsi:type="primary" referenceId="PRIMARY">
       <column name="entity_id"/>
     </constraint>
     <index referenceId="ADYEN_PAYMENT_RESPONSE_MERCHANT_REFERENCE" indexType="btree">
       <column name="merchant_reference"/>
+    </index>
+    <index referenceId="ADYEN_PAYMENT_RESPONSE_CREATED_AT" indexType="btree">
+      <column name="created_at"/>
     </index>
   </table>
   <table name="adyen_creditmemo" resource="default" engine="innodb" comment="Adyen Creditmemo">
@@ -126,5 +130,42 @@
       <column name="entity_id"/>
     </constraint>
     <constraint xsi:type="foreign" referenceId="ADYEN_CREDITMEMO_ADYEN_ORDER_PAYMENT_ID_ADYEN_ORDER_PAYMENT_ENTITY_ID" table="adyen_creditmemo" column="adyen_order_payment_id" referenceTable="adyen_order_payment" referenceColumn="entity_id" onDelete="CASCADE"/>
+  </table>
+  <table name="adyen_analytics_event" resource="default" engine="innodb" comment="Adyen Analytics Event Queue">
+    <column xsi:type="int" name="entity_id" padding="10" unsigned="true" nullable="false" identity="true" comment="Adyen Analytics Event Entity ID"/>
+    <column xsi:type="varchar" name="uuid" length="255" nullable="false" comment="Unique event ID"/>
+    <column xsi:type="varchar" name="relation_id" length="255" nullable="false" comment="Relation ID"/>
+    <column xsi:type="varchar" name="type" length="50" nullable="false" comment="Type"/>
+    <column xsi:type="varchar" name="topic" length="255" nullable="false" comment="Topic"/>
+    <column xsi:type="text" name="message" nullable="true" comment="Message"/>
+    <column xsi:type="varchar" name="version" length="50" nullable="false" comment="Version"/>
+    <column xsi:type="varchar" name="error_type" nullable="true" comment="Error Type"/>
+    <column xsi:type="varchar" name="error_code" nullable="true" comment="Error Code"/>
+    <column xsi:type="int" name="error_count" nullable="false" default="0" comment="Error Count"/>
+    <column xsi:type="int" name="status" nullable="false" default="0" comment="Status"/>
+    <column xsi:type="timestamp" name="created_at" nullable="false" default="CURRENT_TIMESTAMP" comment="Created At"/>
+    <column xsi:type="timestamp" name="updated_at" nullable="true" on_update="true" comment="Updated At"/>
+    <column xsi:type="timestamp" name="scheduled_processing_time" nullable="true" default="CURRENT_TIMESTAMP" comment="Scheduled Processing Time"/>
+    <constraint xsi:type="primary" referenceId="PRIMARY">
+      <column name="entity_id"/>
+    </constraint>
+    <index referenceId="ADYEN_ANALYTICS_EVENT_TYPE" indexType="btree">
+      <column name="type"/>
+    </index>
+    <index referenceId="ADYEN_ANALYTICS_EVENT_STATUS" indexType="btree">
+      <column name="status"/>
+    </index>
+    <index referenceId="ADYEN_ANALYTICS_EVENT_ERROR_COUNT" indexType="btree">
+      <column name="error_count"/>
+    </index>
+    <index referenceId="ADYEN_ANALYTICS_EVENT_SCHEDULED_PROCESSING_TIME" indexType="btree">
+      <column name="scheduled_processing_time"/>
+    </index>
+    <index referenceId="ADYEN_ANALYTICS_EVENT_TYPE_STATUS_ERROR_COUNT_SCHEDULED_PROCESSING_TIME" indexType="btree">
+      <column name="type"/>
+      <column name="status"/>
+      <column name="error_count"/>
+      <column name="scheduled_processing_time"/>
+    </index>
   </table>
 </schema>

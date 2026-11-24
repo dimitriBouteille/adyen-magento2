@@ -20,6 +20,7 @@ use Magento\Framework\Exception\LocalizedException;
 use Magento\Framework\Exception\NoSuchEntityException;
 use Magento\Framework\Exception\ValidatorException;
 use Magento\Sales\Api\OrderRepositoryInterface;
+use Magento\Framework\Message\ManagerInterface;
 
 class AdyenPaymentsDetails implements AdyenPaymentsDetailsInterface
 {
@@ -27,17 +28,20 @@ class AdyenPaymentsDetails implements AdyenPaymentsDetailsInterface
     private PaymentsDetails $paymentsDetails;
     private PaymentResponseHandler $paymentResponseHandler;
     private Session $checkoutSession;
+    private ManagerInterface $messageManager;
 
     public function __construct(
         OrderRepositoryInterface $orderRepository,
         PaymentsDetails $paymentsDetails,
         PaymentResponseHandler $paymentResponseHandler,
-        Session $checkoutSession
+        Session $checkoutSession,
+        ManagerInterface $messageManager
     ) {
         $this->orderRepository = $orderRepository;
         $this->paymentsDetails = $paymentsDetails;
         $this->paymentResponseHandler = $paymentResponseHandler;
         $this->checkoutSession = $checkoutSession;
+        $this->messageManager = $messageManager;
     }
 
     /**
@@ -68,14 +72,14 @@ class AdyenPaymentsDetails implements AdyenPaymentsDetailsInterface
         // Handle response
         if (!$this->paymentResponseHandler->handlePaymentsDetailsResponse($response, $order)) {
             $this->checkoutSession->restoreQuote();
-            throw new ValidatorException(__('The payment is REFUSED.'));
+            $this->messageManager->addErrorMessage(__('The payment is REFUSED.'));
         }
 
         return json_encode(
             $this->paymentResponseHandler->formatPaymentResponse(
                 $response['resultCode'],
                 $response['action'] ?? null,
-                $response['additionalData'] ?? null
+                !empty($response['donationToken'])
             )
         );
     }

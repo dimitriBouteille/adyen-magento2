@@ -12,12 +12,10 @@
 define([
     'jquery',
     'ko',
-    'uiLayout',
     'mage/url',
     'Magento_Checkout/js/action/place-order',
     'Magento_Checkout/js/model/full-screen-loader',
     'Magento_Checkout/js/model/quote',
-    'Magento_Ui/js/model/messages',
     'Magento_Vault/js/view/payment/method-renderer/vault',
     'Magento_Checkout/js/model/error-processor',
     'Adyen_Payment/js/model/adyen-payment-service',
@@ -29,12 +27,10 @@ define([
 ], function (
     $,
     ko,
-    layout,
     url,
     placeOrderAction,
     fullScreenLoader,
     quote,
-    Messages,
     VaultComponent,
     errorProcessor,
     adyenPaymentService,
@@ -83,11 +79,27 @@ define([
         },
 
         enablePaymentMethod: function (paymentMethodsResponse) {
-            if (!!paymentMethodsResponse.paymentMethodsResponse) {
-                this.adyenVaultPaymentMethod(true);
+            const storedPaymentMethods =
+                paymentMethodsResponse?.paymentMethodsResponse?.storedPaymentMethods || [];
+
+            const tokenBrand = this.details?.type?.toLowerCase();
+
+            let isTokenAllowed;
+            if (!tokenBrand) {
+                isTokenAllowed = false;
+            } else {
+                isTokenAllowed = storedPaymentMethods.some(
+                    pm => pm.brand?.toLowerCase() === tokenBrand
+                );
+            }
+
+            this.adyenVaultPaymentMethod(isTokenAllowed);
+
+            if (paymentMethodsResponse?.paymentMethodsResponse) {
                 fullScreenLoader.stopLoader();
             }
         },
+
 
         /*
          * Create generic AdyenCheckout library and mount payment method component
@@ -114,18 +126,28 @@ define([
 
         // Build AdyenCheckout library and creates the payment method component
         createCheckoutComponent: async function() {
-            if (!this.checkoutComponent) {
-                const paymentMethodsResponse = adyenPaymentService.getPaymentMethods();
-                const countryCode = quote.billingAddress().countryId;
+            const billingAddressObservable = quote.billingAddress;
+            let self = this;
 
-                this.checkoutComponent = await adyenCheckout.buildCheckoutComponent(
-                    paymentMethodsResponse(),
-                    countryCode,
-                    this.handleOnAdditionalDetails.bind(this)
-                );
+            if (billingAddressObservable() && billingAddressObservable().countryId) {
+                if (!this.checkoutComponent) {
+                    const paymentMethodsResponse = adyenPaymentService.getPaymentMethods();
+
+                    this.checkoutComponent = await adyenCheckout.buildCheckoutComponent(
+                        paymentMethodsResponse(),
+                        billingAddressObservable().countryId,
+                        this.handleOnAdditionalDetails.bind(this)
+                    );
+                }
+
+                this.renderCheckoutComponent();
+            } else {
+                billingAddressObservable.subscribe(function (updatedBillingAddress) {
+                    if (updatedBillingAddress && updatedBillingAddress.countryId) {
+                        self.createCheckoutComponent();
+                    }
+                });
             }
-
-            this.renderCheckoutComponent();
         },
 
         handleOnAdditionalDetails: function (result) {
@@ -133,9 +155,10 @@ define([
             let request = result.data;
             adyenPaymentModal.hideModalLabel(this.modalLabel);
             fullScreenLoader.startLoader();
+            let popupModal = self.showModal();
 
             adyenPaymentService.paymentDetails(request, self.orderId).done(function (responseJSON) {
-                self.handleAdyenResult(responseJSON, self.orderId);
+                self.handleAdyenResult(responseJSON, self.orderId, popupModal);
             }).fail(function (response) {
                 self.closeModal(popupModal);
                 errorProcessor.process(response, self.messageContainer);
@@ -248,15 +271,24 @@ define([
             return data;
         },
 
-        handleAdyenResult: function (responseJSON, orderId) {
-            let self = this;
+        handleAdyenResult: function (responseJSON, orderId, popupModal = null) {
             const response = JSON.parse(responseJSON);
 
             if (!!response.isFinal) {
-                // Status is final redirect to the success page
-                window.location.replace(url.build(this.successPage));
+                if (['Authorised', 'Received', 'PresentToShopper'].includes(response.resultCode)) {
+                    window.location.replace(url.build(this.successPage));
+                } else {
+                    if (popupModal) {
+                        this.closeModal(popupModal);
+                    }
+
+                    this.messageContainer.addErrorMessage(response);
+                    this.isPlaceOrderActionAllowed(true);
+
+                    fullScreenLoader.stopLoader();
+                }
             } else {
-                self.handleAction(response.action, orderId);
+                this.handleAction(response.action, orderId);
             }
         },
 
@@ -326,6 +358,21 @@ define([
 
         getCardType: function () {
             return this.details.type;
+        },
+
+        getTitle: function (type) {
+            const paymentMethodsObservable = adyenPaymentService.getPaymentMethods();
+            const methods = paymentMethodsObservable?.()?.paymentMethodsResponse?.storedPaymentMethods;
+
+            // Find the stored payment method where brand matches the type
+            const match = methods.find(method => method.brand === type);
+
+            if (match && match.name) {
+                return match.name;
+            }
+
+            // Fallback: capitalize the type
+            return type ? type.charAt(0).toUpperCase() + type.slice(1) : '';
         },
 
         getCode: function() {

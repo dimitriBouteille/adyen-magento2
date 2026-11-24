@@ -20,7 +20,10 @@ use Magento\Framework\Exception\ValidatorException;
 use Magento\Framework\TestFramework\Unit\Helper\ObjectManager;
 use Magento\Sales\Api\Data\OrderInterface;
 use Magento\Sales\Api\OrderRepositoryInterface;
+use Magento\Framework\Message\ManagerInterface;
+use PHPUnit\Framework\Attributes\AllowMockObjectsWithoutExpectations;
 
+#[AllowMockObjectsWithoutExpectations]
 class AdyenPaymentsDetailsTest extends AbstractAdyenTestCase
 {
     private $adyenPaymentsDetails;
@@ -28,6 +31,7 @@ class AdyenPaymentsDetailsTest extends AbstractAdyenTestCase
     private $paymentsDetailsHelperMock;
     private $paymentResponseHandlerHelperMock;
     private $adyenLoggerMock;
+    private $messageManagerMock;
 
     protected function setUp(): void
     {
@@ -38,6 +42,7 @@ class AdyenPaymentsDetailsTest extends AbstractAdyenTestCase
             ['handlePaymentsDetailsResponse']
         );
         $this->adyenLoggerMock = $this->createMock(AdyenLogger::class);
+        $this->messageManagerMock = $this->createMock(ManagerInterface::class);
 
         $objectManager = new ObjectManager($this);
         $this->adyenPaymentsDetails = $objectManager->getObject(AdyenPaymentsDetails::class, [
@@ -45,6 +50,7 @@ class AdyenPaymentsDetailsTest extends AbstractAdyenTestCase
             'paymentsDetails' => $this->paymentsDetailsHelperMock,
             'paymentResponseHandler' => $this->paymentResponseHandlerHelperMock,
             'adyenLogger' => $this->adyenLoggerMock,
+            'messageManager' => $this->messageManagerMock
         ]);
     }
 
@@ -85,10 +91,8 @@ class AdyenPaymentsDetailsTest extends AbstractAdyenTestCase
 
     public function testInvalidDetailsCall()
     {
-        $this->expectException(ValidatorException::class);
-
         $payload = '{"someData":"someValue"}';
-        $result = ['resultCode' => 'Authorised'];
+        $result = ['resultCode' => 'Refused'];
         $orderId = 1;
 
         $this->orderRepositoryMock
@@ -102,9 +106,17 @@ class AdyenPaymentsDetailsTest extends AbstractAdyenTestCase
         $this->paymentResponseHandlerHelperMock
             ->method('handlePaymentsDetailsResponse')
             ->willReturn(false);
+            
+        $this->messageManagerMock
+            ->expects($this->once())
+            ->method('addErrorMessage');
 
-        $this->adyenPaymentsDetails->initiate($payload, $orderId);
+        $response = $this->adyenPaymentsDetails->initiate($payload, $orderId);
+        $decodedResponse = json_decode($response, true);
+
+        $this->assertJson($response);
+        $this->assertArrayHasKey('isFinal', $decodedResponse);
+        $this->assertArrayHasKey('resultCode', $decodedResponse);
+        $this->assertArrayHasKey('message', $decodedResponse);
     }
-
-
 }

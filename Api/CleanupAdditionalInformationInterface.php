@@ -12,6 +12,7 @@
 
 namespace Adyen\Payment\Api;
 
+use Adyen\Payment\Helper\OrdersApi;
 use Magento\Sales\Api\Data\OrderPaymentInterface;
 
 interface CleanupAdditionalInformationInterface
@@ -21,7 +22,6 @@ interface CleanupAdditionalInformationInterface
     const FIELD_DONATION_TOKEN = 'donationToken';
     const FIELD_FRONTEND_TYPE = 'frontendType';
     const FIELD_COMBO_CARD_TYPE = 'combo_card_type';
-    const FIELD_CC_TYPE = 'cc_type';
     const FIELD_RESULT_CODE = 'resultCode';
 
     const FIELDS_TO_BE_CLEANED_UP = [
@@ -30,8 +30,8 @@ interface CleanupAdditionalInformationInterface
         self::FIELD_DONATION_TOKEN,
         self::FIELD_FRONTEND_TYPE,
         self::FIELD_COMBO_CARD_TYPE,
-        self::FIELD_CC_TYPE,
-        self::FIELD_RESULT_CODE
+        self::FIELD_RESULT_CODE,
+        OrdersApi::DATA_KEY_CHECKOUT_API_ORDER
     ];
 
     /**

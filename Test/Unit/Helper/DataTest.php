@@ -6,6 +6,7 @@ namespace Adyen\Payment\Test\Unit\Helper;
 
 use Adyen\AdyenException;
 use Adyen\Client;
+use Adyen\Region;
 use Adyen\Payment\Helper\Config as ConfigHelper;
 use Adyen\Payment\Helper\Data;
 use Adyen\Payment\Logger\AdyenLogger;
@@ -39,7 +40,9 @@ use Adyen\Service\Checkout\OrdersApi;
 use Adyen\Service\Checkout\PaymentLinksApi;
 use Adyen\Service\Checkout\PaymentsApi;
 use Adyen\Service\RecurringApi;
+use PHPUnit\Framework\Attributes\AllowMockObjectsWithoutExpectations;
 
+#[AllowMockObjectsWithoutExpectations]
 class DataTest extends AbstractAdyenTestCase
 {
     private Data $dataHelper;
@@ -162,6 +165,7 @@ class DataTest extends AbstractAdyenTestCase
         $regions = $this->dataHelper->getCheckoutFrontendRegions();
         self::assertArrayHasKey('eu', $regions);
         self::assertArrayHasKey('au', $regions);
+        self::assertArrayHasKey('nea', $regions);
     }
 
     #[Test]
@@ -225,7 +229,7 @@ class DataTest extends AbstractAdyenTestCase
 
         $this->platformInfo
             ->method('getMagentoDetails')
-            ->willReturn(['name' => 'Magento', 'version' => '2.4.6']);
+            ->willReturn(['name' => 'Magento', 'version' => '2.4.6', 'edition' => 'Community']);
 
         $this->scopeConfig
             ->method('getValue')
@@ -235,6 +239,127 @@ class DataTest extends AbstractAdyenTestCase
 
         self::assertInstanceOf(Client::class, $client);
         //self::assertSame('Magento 2 plugin', $client->getApplicationName());
+    }
+
+    #[Test]
+    public function testInitializeAdyenClientForPosAppliesConfiguredRegionInLiveMode(): void
+    {
+        $storeId = 1;
+        $apiKey = 'pos_api_key';
+
+        $this->store->method('getId')->willReturn($storeId);
+        $this->storeManager->method('getStore')->willReturn($this->store);
+        $this->configHelper->method('isDemoMode')->with($storeId)->willReturn(false);
+        $this->configHelper->method('getLiveEndpointPrefix')->with($storeId)->willReturn('live-prefix');
+        $this->configHelper->method('getTerminalApiRegion')->with($storeId)->willReturn(Region::APSE);
+        $this->platformInfo->method('getModuleName')->willReturn('Adyen_Payment');
+        $this->platformInfo->method('getModuleVersion')->willReturn('9.0.0');
+        $this->platformInfo->method('getMagentoDetails')
+            ->willReturn(['name' => 'Magento', 'version' => '2.4.6', 'edition' => 'Community']);
+        $this->scopeConfig->method('getValue')->willReturn(null);
+
+        $client = $this->dataHelper->initializeAdyenClientForPos($storeId, $apiKey);
+
+        self::assertInstanceOf(Client::class, $client);
+        self::assertSame(Region::APSE, $client->getConfig()->get('region'));
+    }
+
+    #[Test]
+    public function testInitializeAdyenClientForPosDoesNotApplyRegionInDemoMode(): void
+    {
+        $storeId = 1;
+        $apiKey = 'pos_api_key';
+
+        $this->store->method('getId')->willReturn($storeId);
+        $this->storeManager->method('getStore')->willReturn($this->store);
+        $this->configHelper->method('isDemoMode')->with($storeId)->willReturn(true);
+        $this->configHelper->method('getTerminalApiRegion')->with($storeId)->willReturn(Region::APSE);
+        $this->platformInfo->method('getModuleName')->willReturn('Adyen_Payment');
+        $this->platformInfo->method('getModuleVersion')->willReturn('9.0.0');
+        $this->platformInfo->method('getMagentoDetails')
+            ->willReturn(['name' => 'Magento', 'version' => '2.4.6', 'edition' => 'Community']);
+        $this->scopeConfig->method('getValue')->willReturn(null);
+
+        $client = $this->dataHelper->initializeAdyenClientForPos($storeId, $apiKey);
+
+        self::assertInstanceOf(Client::class, $client);
+        self::assertNull($client->getConfig()->get('region'));
+    }
+
+    #[Test]
+    public function testInitializeAdyenClientForPosDoesNotApplyRegionWhenEmpty(): void
+    {
+        $storeId = 1;
+        $apiKey = 'pos_api_key';
+
+        $this->store->method('getId')->willReturn($storeId);
+        $this->storeManager->method('getStore')->willReturn($this->store);
+        $this->configHelper->method('isDemoMode')->with($storeId)->willReturn(false);
+        $this->configHelper->method('getLiveEndpointPrefix')->with($storeId)->willReturn('live-prefix');
+        $this->configHelper->method('getTerminalApiRegion')->with($storeId)->willReturn(null);
+        $this->platformInfo->method('getModuleName')->willReturn('Adyen_Payment');
+        $this->platformInfo->method('getModuleVersion')->willReturn('9.0.0');
+        $this->platformInfo->method('getMagentoDetails')
+            ->willReturn(['name' => 'Magento', 'version' => '2.4.6', 'edition' => 'Community']);
+        $this->scopeConfig->method('getValue')->willReturn(null);
+
+        $client = $this->dataHelper->initializeAdyenClientForPos($storeId, $apiKey);
+
+        self::assertInstanceOf(Client::class, $client);
+        self::assertNull($client->getConfig()->get('region'));
+    }
+
+    #[Test]
+    public function testInitializeAdyenClientForPosAppliesConfiguredTimeout(): void
+    {
+        $storeId = 1;
+        $apiKey = 'pos_api_key';
+        $timeout = 45;
+
+        $this->store->method('getId')->willReturn($storeId);
+        $this->storeManager->method('getStore')->willReturn($this->store);
+        $this->configHelper->method('isDemoMode')->with($storeId)->willReturn(false);
+        $this->configHelper->method('getLiveEndpointPrefix')->with($storeId)->willReturn('live-prefix');
+        $this->configHelper->method('getAdyenPosCloudConfigData')
+            ->with('total_timeout', $storeId)
+            ->willReturn($timeout);
+        $this->configHelper->method('getTerminalApiRegion')->with($storeId)->willReturn(null);
+        $this->platformInfo->method('getModuleName')->willReturn('Adyen_Payment');
+        $this->platformInfo->method('getModuleVersion')->willReturn('9.0.0');
+        $this->platformInfo->method('getMagentoDetails')
+            ->willReturn(['name' => 'Magento', 'version' => '2.4.6', 'edition' => 'Community']);
+        $this->scopeConfig->method('getValue')->willReturn(null);
+
+        $client = $this->dataHelper->initializeAdyenClientForPos($storeId, $apiKey);
+
+        self::assertInstanceOf(Client::class, $client);
+        self::assertSame($timeout, $client->getConfig()->get('timeout'));
+    }
+
+    #[Test]
+    public function testInitializeAdyenClientForPosDoesNotApplyTimeoutWhenEmpty(): void
+    {
+        $storeId = 1;
+        $apiKey = 'pos_api_key';
+
+        $this->store->method('getId')->willReturn($storeId);
+        $this->storeManager->method('getStore')->willReturn($this->store);
+        $this->configHelper->method('isDemoMode')->with($storeId)->willReturn(false);
+        $this->configHelper->method('getLiveEndpointPrefix')->with($storeId)->willReturn('live-prefix');
+        $this->configHelper->method('getAdyenPosCloudConfigData')
+            ->with('total_timeout', $storeId)
+            ->willReturn(null);
+        $this->configHelper->method('getTerminalApiRegion')->with($storeId)->willReturn(null);
+        $this->platformInfo->method('getModuleName')->willReturn('Adyen_Payment');
+        $this->platformInfo->method('getModuleVersion')->willReturn('9.0.0');
+        $this->platformInfo->method('getMagentoDetails')
+            ->willReturn(['name' => 'Magento', 'version' => '2.4.6', 'edition' => 'Community']);
+        $this->scopeConfig->method('getValue')->willReturn(null);
+
+        $client = $this->dataHelper->initializeAdyenClientForPos($storeId, $apiKey);
+
+        self::assertInstanceOf(Client::class, $client);
+        self::assertNull($client->getConfig()->get('timeout'));
     }
 
     #[Test]
@@ -353,6 +478,224 @@ class DataTest extends AbstractAdyenTestCase
     }
 
     #[Test]
+    public function testLogRequestInLiveModeWithReference(): void
+    {
+        $storeId = 11;
+        $apiVersion = 'v69';
+        $endpoint = '/payments';
+        $livePrefix = 'live-prefix';
+
+        $request = [
+            'reference' => 'ABC123',
+            'merchantAccount' => 'LiveMerchant',
+            'amount' => ['value' => 1000, 'currency' => 'EUR'],
+        ];
+
+        $this->store->method('getId')->willReturn($storeId);
+
+        $this->storeManager
+            ->method('getStore')
+            ->willReturn($this->store);
+
+        $this->configHelper
+            ->method('isDemoMode')
+            ->with($storeId)
+            ->willReturn(false);
+
+        $this->configHelper
+            ->method('getLiveEndpointPrefix')
+            ->with($storeId)
+            ->willReturn($livePrefix);
+
+        $this->adyenLogger
+            ->expects(self::once())
+            ->method('addAdyenInfoLog')
+            ->with(
+                self::stringContains('Request to Adyen API'),
+                self::callback(function ($context) use ($apiVersion, $livePrefix) {
+                    // apiVersion and livePrefix should always be present
+                    self::assertSame($apiVersion, $context['apiVersion']);
+                    self::assertSame($livePrefix, $context['livePrefix']);
+
+                    // body must exist and only contain the reference key
+                    self::assertArrayHasKey('body', $context);
+                    self::assertSame(
+                        ['reference' => 'ABC123'],
+                        $context['body']
+                    );
+
+                    return true;
+                })
+            );
+
+        $this->dataHelper->logRequest($request, $apiVersion, $endpoint);
+    }
+
+    #[Test]
+    public function testLogRequestInLiveModeWithoutAllowedFields(): void
+    {
+        $storeId = 12;
+        $apiVersion = 'v70';
+        $endpoint = '/connectedTerminals';
+        $livePrefix = 'live-prefix';
+
+        // No "reference*" fields and no whitelisted keys
+        $request = [
+            'merchantAccount' => 'LiveMerchant',
+            'amount' => ['value' => 1000, 'currency' => 'EUR'],
+        ];
+
+        $this->store->method('getId')->willReturn($storeId);
+
+        $this->storeManager
+            ->method('getStore')
+            ->willReturn($this->store);
+
+        $this->configHelper
+            ->method('isDemoMode')
+            ->with($storeId)
+            ->willReturn(false);
+
+        $this->configHelper
+            ->method('getLiveEndpointPrefix')
+            ->with($storeId)
+            ->willReturn($livePrefix);
+
+        $this->adyenLogger
+            ->expects(self::once())
+            ->method('addAdyenInfoLog')
+            ->with(
+                self::stringContains('Request to Adyen API'),
+                self::callback(function ($context) use ($apiVersion, $livePrefix) {
+                    self::assertSame($apiVersion, $context['apiVersion']);
+                    self::assertSame($livePrefix, $context['livePrefix']);
+
+                    // body must NOT be present because filterReferences returns an empty array
+                    self::assertArrayNotHasKey('body', $context);
+
+                    return true;
+                })
+            );
+
+        $this->dataHelper->logRequest($request, $apiVersion, $endpoint);
+    }
+
+    #[Test]
+    public function testLogResponseInLiveModeWithPspReference(): void
+    {
+        $storeId = 13;
+        $response = [
+            'pspReference' => 'PSP12345',
+            'resultCode' => 'Authorised',
+        ];
+
+        $this->store->method('getId')->willReturn($storeId);
+
+        $this->storeManager
+            ->method('getStore')
+            ->willReturn($this->store);
+
+        $this->configHelper
+            ->method('isDemoMode')
+            ->with($storeId)
+            ->willReturn(false);
+
+        $this->adyenLogger
+            ->expects(self::once())
+            ->method('addAdyenInfoLog')
+            ->with(
+                'Response from Adyen API',
+                self::callback(function ($context) {
+                    // body exists and only contains the pspReference key
+                    self::assertArrayHasKey('body', $context);
+                    self::assertSame(
+                        ['pspReference' => 'PSP12345'],
+                        $context['body']
+                    );
+
+                    return true;
+                })
+            );
+
+        $this->dataHelper->logResponse($response);
+    }
+
+    #[Test]
+    public function testLogResponseInLiveModeWithUniqueTerminalIds(): void
+    {
+        $storeId = 14;
+        $response = [
+            'uniqueTerminalIds' => ['T001', 'T002'],
+            'status' => 'ok',
+        ];
+
+        $this->store->method('getId')->willReturn($storeId);
+
+        $this->storeManager
+            ->method('getStore')
+            ->willReturn($this->store);
+
+        $this->configHelper
+            ->method('isDemoMode')
+            ->with($storeId)
+            ->willReturn(false);
+
+        $this->adyenLogger
+            ->expects(self::once())
+            ->method('addAdyenInfoLog')
+            ->with(
+                'Response from Adyen API',
+                self::callback(function ($context) {
+                    // body exists and only contains the whitelisted key uniqueTerminalIds
+                    self::assertArrayHasKey('body', $context);
+                    self::assertSame(
+                        ['uniqueTerminalIds' => ['T001', 'T002']],
+                        $context['body']
+                    );
+
+                    return true;
+                })
+            );
+
+        $this->dataHelper->logResponse($response);
+    }
+
+    #[Test]
+    public function testLogResponseInLiveModeWithoutAllowedFields(): void
+    {
+        $storeId = 15;
+        $response = [
+            'resultCode' => 'Authorised',
+            'amount' => ['value' => 1000, 'currency' => 'EUR'],
+        ];
+
+        $this->store->method('getId')->willReturn($storeId);
+
+        $this->storeManager
+            ->method('getStore')
+            ->willReturn($this->store);
+
+        $this->configHelper
+            ->method('isDemoMode')
+            ->with($storeId)
+            ->willReturn(false);
+
+        $this->adyenLogger
+            ->expects(self::once())
+            ->method('addAdyenInfoLog')
+            ->with(
+                'Response from Adyen API',
+                self::callback(function ($context) {
+                    // No allowed keys -> body must not be present
+                    self::assertArrayNotHasKey('body', $context);
+                    return true;
+                })
+            );
+
+        $this->dataHelper->logResponse($response);
+    }
+
+    #[Test]
     public function testInitializeAdyenClientWithClientConfigMoto(): void
     {
         $storeId = 3;
@@ -389,7 +732,7 @@ class DataTest extends AbstractAdyenTestCase
             ->willReturn('9.0.0');
         $this->platformInfo
             ->method('getMagentoDetails')
-            ->willReturn(['name' => 'Magento', 'version' => '2.4.6']);
+            ->willReturn(['name' => 'Magento', 'version' => '2.4.6', 'edition' => 'Community']);
 
         $this->scopeConfig
             ->method('getValue')
@@ -454,6 +797,32 @@ class DataTest extends AbstractAdyenTestCase
         $result = $this->dataHelper->getMagentoCreditCartType('american_express');
 
         self::assertSame('amex', $result);
+    }
+
+    #[Test]
+    public function testGetMagentoCreditCartTypeWithNullCcType(): void
+    {
+        $this->dataStorage
+            ->method('get')
+            ->with('adyen_credit_cards')
+            ->willReturn(['amex' => ['code' => 'AE', 'code_alt' => 'american_express']]);
+
+        $result = $this->dataHelper->getMagentoCreditCartType(null);
+
+        self::assertNull($result);
+    }
+
+    #[Test]
+    public function testGetMagentoCreditCartTypeWithUnmappedCcType(): void
+    {
+        $this->dataStorage
+            ->method('get')
+            ->with('adyen_credit_cards')
+            ->willReturn(['amex' => ['code' => 'AE', 'code_alt' => 'american_express']]);
+
+        $result = $this->dataHelper->getMagentoCreditCartType('eftpos_australia');
+
+        self::assertSame('eftpos_australia', $result);
     }
 
     #[Test]
@@ -610,7 +979,7 @@ class DataTest extends AbstractAdyenTestCase
 
         $this->platformInfo->method('getModuleName')->willReturn('Adyen_Payment');
         $this->platformInfo->method('getModuleVersion')->willReturn('9.0.0');
-        $this->platformInfo->method('getMagentoDetails')->willReturn(['name' => 'Magento', 'version' => '2.4.6']);
+        $this->platformInfo->method('getMagentoDetails')->willReturn(['name' => 'Magento', 'version' => '2.4.6', 'edition' => 'Community']);
         $this->scopeConfig->method('getValue')->willReturn(null);
 
         $this->configHelper->method('getLiveEndpointPrefix')->with($storeId)->willReturn($livePrefix);
@@ -635,7 +1004,7 @@ class DataTest extends AbstractAdyenTestCase
 
         $this->platformInfo->method('getModuleName')->willReturn('Adyen_Payment');
         $this->platformInfo->method('getModuleVersion')->willReturn('9.0.0');
-        $this->platformInfo->method('getMagentoDetails')->willReturn(['name' => 'Magento', 'version' => '2.4.6']);
+        $this->platformInfo->method('getMagentoDetails')->willReturn(['name' => 'Magento', 'version' => '2.4.6', 'edition' => 'Community']);
         $this->scopeConfig->method('getValue')->willReturn(null);
 
         $client = $this->dataHelper->initializeAdyenClientWithClientConfig([
@@ -770,6 +1139,26 @@ class DataTest extends AbstractAdyenTestCase
 
         // Assert the expected result
         $this->assertEquals(Data::LIVE_IN, $result);
+    }
+
+    #[Test]
+    public function testGetCheckoutEnvironmentLiveNEA()
+    {
+        // Setup the mock to return false for isDemoMode
+        $this->configHelper->expects($this->once())
+            ->method('isDemoMode')
+            ->willReturn(false);
+
+        // Setup the mock to return "nea" for getCheckoutFrontendRegion
+        $this->configHelper->expects($this->once())
+            ->method('getCheckoutFrontendRegion')
+            ->willReturn("nea");
+
+        // Call the method under test
+        $result = $this->dataHelper->getCheckoutEnvironment();
+
+        // Assert the expected result
+        $this->assertEquals(Data::LIVE_NEA, $result);
     }
 
     #[Test]

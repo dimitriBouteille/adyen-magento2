@@ -539,6 +539,23 @@ class Order extends AbstractHelper
             ->addFieldToFilter(Notification::PSPREFRENCE, $notification->getOriginalReference())
             ->getFirstItem();
 
+        if (empty($notification->getOriginalReference()) || !$orderPayment->getEntityId()) {
+            $this->adyenLogger->addAdyenWarning(
+                sprintf(
+                    'Skipping refund for notification %s (%s): originalReference is missing or no matching '
+                    . 'adyen_order_payment was found. Configure the webhook to include originalReference.',
+                    $notification->getId(),
+                    $notification->getEventCode()
+                ),
+                array_merge(
+                    $this->adyenLogger->getOrderContext($order),
+                    ['pspReference' => $notification->getPspreference()]
+                )
+            );
+
+            return $order;
+        }
+
         $this->adyenOrderPaymentHelper->refundAdyenOrderPayment($orderPayment, $notification);
         $this->adyenLogger->addAdyenNotification(
             sprintf(
@@ -626,9 +643,12 @@ class Order extends AbstractHelper
             );
         }
 
-        $this->adyenCreditmemoHelper->updateAdyenCreditmemosStatus(
-            $linkedAdyenCreditmemo, CreditmemoInterface::COMPLETED_STATUS
-        );
+        if (isset($linkedAdyenCreditmemo)) {
+            $this->adyenCreditmemoHelper->updateAdyenCreditmemosStatus(
+                $linkedAdyenCreditmemo,
+                CreditmemoInterface::COMPLETED_STATUS
+            );
+        }
 
         $order->addStatusHistoryComment(__(sprintf(
             '%s Webhook successfully handled',

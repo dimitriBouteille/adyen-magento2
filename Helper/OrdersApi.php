@@ -12,28 +12,28 @@
 namespace Adyen\Payment\Helper;
 
 use Adyen\AdyenException;
+use Adyen\Model\Checkout\BalanceCheckRequest;
+use Adyen\Model\Checkout\BalanceCheckResponse;
+use Adyen\Model\Checkout\CancelOrderRequest;
 use Adyen\Model\Checkout\CreateOrderRequest;
 use Adyen\Client;
 use Adyen\Payment\Logger\AdyenLogger;
-use Adyen\Service\Checkout\OrdersApi as CheckoutOrdersApi;
 use Magento\Framework\Exception\NoSuchEntityException;
+use Magento\Sales\Api\Data\OrderInterface;
+use Throwable;
 
 class OrdersApi
 {
-    /**
-     * @var Config
-     */
-    private Config $configHelper;
+    const DATA_KEY_CHECKOUT_API_ORDER = 'checkoutApiOrder';
 
     /**
-     * @var Data
+     * Temporary storage for Orders API response for partial payments
+     *
+     * Holds `orderData` and `pspReference` values.
+     *
+     * @var array|null
      */
-    private Data $adyenHelper;
-
-    /**
-     * @var AdyenLogger
-     */
-    private AdyenLogger $adyenLogger;
+    private ?array $checkoutApiOrder = null;
 
     /**
      * @param Config $configHelper
@@ -41,14 +41,10 @@ class OrdersApi
      * @param AdyenLogger $adyenLogger
      */
     public function __construct(
-        Config $configHelper,
-        Data $adyenHelper,
-        AdyenLogger $adyenLogger
-    ) {
-        $this->configHelper = $configHelper;
-        $this->adyenHelper = $adyenHelper;
-        $this->adyenLogger = $adyenLogger;
-    }
+        private readonly Config $configHelper,
+        private readonly Data $adyenHelper,
+        private readonly AdyenLogger $adyenLogger
+    ) {}
 
     /**
      * @param int $amount
@@ -64,11 +60,12 @@ class OrdersApi
         $request = $this->buildOrdersRequest($amount, $currency, $merchantReference, $storeId);
 
         $client = $this->adyenHelper->initializeAdyenClient($storeId);
-        $checkoutService = new CheckoutOrdersApi($client);
+        $checkoutService = $this->adyenHelper->initializeOrdersApi($client);
 
         try {
             $this->adyenHelper->logRequest($request, Client::API_CHECKOUT_VERSION, '/orders');
             $responseObj = $checkoutService->orders(new CreateOrderRequest($request));
+            $this->setCheckoutApiOrder($responseObj->getPspReference(), $responseObj->getOrderData());
             $response = $responseObj->toArray();
         } catch (AdyenException $e) {
             $this->adyenLogger->error(
@@ -105,5 +102,93 @@ class OrdersApi
             ],
             'merchantAccount' => $merchantAccount
         ];
+    }
+
+    /**
+     * @param OrderInterface $order
+     * @param string $pspReference
+     * @param string $orderData
+     * @return void
+     */
+    public function cancelOrder(OrderInterface $order, string $pspReference, string $orderData): void
+    {
+        try {
+            $storeId = $order->getStoreId();
+            $client = $this->adyenHelper->initializeAdyenClient($storeId);
+            $service = $this->adyenHelper->initializeOrdersApi($client);
+
+            $request = [
+                'order' => [
+                    'pspReference' => $pspReference,
+                    'orderData' => $orderData
+                ],
+                'merchantAccount' => $this->configHelper->getMerchantAccount($storeId),
+            ];
+
+            $this->adyenHelper->logRequest($request, Client::API_CHECKOUT_VERSION, '/orders/cancel');
+            $response = $service->cancelOrder(new CancelOrderRequest($request));
+            $this->adyenHelper->logResponse($response->toArray());
+        } catch (Throwable $e) {
+            $this->adyenLogger->error(__('Error while trying to cancel the order: %1', $e->getMessage()), [
+                'pspReference' => $pspReference
+            ]);
+        }
+    }
+
+    /**
+     * @param array $request
+     * @param int $storeId
+     * @return BalanceCheckResponse
+     * @throws AdyenException
+     * @throws NoSuchEntityException
+     */
+    public function getGiftcardBalance(array $request, int $storeId): BalanceCheckResponse
+    {
+        $request['merchantAccount'] = $this->configHelper->getMerchantAccount($storeId);
+
+        try {
+            $client = $this->adyenHelper->initializeAdyenClient($storeId);
+            $service = $this->adyenHelper->initializeOrdersApi($client);
+            $response = $service->getBalanceOfGiftCard(new BalanceCheckRequest($request));
+
+            if ($response->getResultCode() === BalanceCheckResponse::RESULT_CODE_FAILED) {
+                // Balance endpoint doesn't send HTTP status 422 for invalid PIN, manual handling required.
+                $errorMessage = $response['additionalData']['acquirerResponseCode'] ?? 'Unknown error!';
+                throw new AdyenException($errorMessage);
+            }
+
+            return $response;
+        } catch (AdyenException $e) {
+            $this->adyenLogger->error(
+                sprintf("An error occurred during balance check! %s", $e->getMessage())
+            );
+
+            throw $e;
+        }
+    }
+
+    /**
+     * Sets the pspReference and orderData of the checkoutOrderApi object in the temporary storage
+     *
+     * @param string $pspReference
+     * @param string $orderData
+     * @return void
+     */
+    public function setCheckoutApiOrder(string $pspReference, string $orderData): void
+    {
+        $this->checkoutApiOrder = [
+            'pspReference' => $pspReference,
+            'orderData' => $orderData
+        ];
+    }
+
+    /**
+     * Returns the value of the Create Order API call from the temporary storage
+     *
+     * @return array|null
+     */
+    public function getCheckoutApiOrder(): ?array
+    {
+        return $this->checkoutApiOrder;
     }
 }

@@ -18,7 +18,10 @@ use Magento\Payment\Gateway\Validator\ResultInterface;
 use Magento\Payment\Gateway\Validator\ResultInterfaceFactory;
 use Magento\Quote\Model\Quote\Payment;
 use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\AllowMockObjectsWithoutExpectations;
 
+#[AllowMockObjectsWithoutExpectations]
 class PaymentLinksRequestValidatorTest extends AbstractAdyenTestCase
 {
     /**
@@ -40,39 +43,41 @@ class PaymentLinksRequestValidatorTest extends AbstractAdyenTestCase
     {
         $this->resultInterfaceFactoryMock = $this->createMock(ResultInterfaceFactory::class);
 
-        $this->resultInterfaceFactoryMock->method('create')->will(
-            $this->returnValueMap(
+        $this->resultInterfaceFactoryMock->method('create')->willReturnMap(
+            [
                 [
                     [
-                        [
-                            "isValid" => false,
-                            "failsDescription" => ["Invalid expiry date selected for Adyen Pay By Link"],
-                            "errorCodes" => []
-                        ],
-                        false
+                        "isValid" => false,
+                        "failsDescription" => ["Invalid expiry date selected for Adyen Pay By Link"],
+                        "errorCodes" => []
                     ],
+                    false
+                ],
+                [
                     [
-                        [
-                            "isValid" => true,
-                            "failsDescription" => [],
-                            "errorCodes" => []
-                        ],
-                        true
-                    ]
-                ]));
+                        "isValid" => true,
+                        "failsDescription" => [],
+                        "errorCodes" => []
+                    ],
+                    true
+                ]
+            ]);
 
         $this->payByLinkValidator = new PaymentLinksRequestValidator($this->resultInterfaceFactoryMock);
 
-        $this->payment = $this->getMockBuilder(Payment::class)
-            ->disableOriginalConstructor()->addMethods(['getAdyenPblExpiresAt'])
+        $this->payment = $this->getMockBuilder(
+            $this->createClassWithMagicMethods(Payment::class, ['getAdyenPblExpiresAt'])
+        )
+            ->disableOriginalConstructor()->onlyMethods(['getAdyenPblExpiresAt'])
             ->getMock();
     }
 
-    /**
-     * @dataProvider adyenPblExpiresAtDataProvider
-     */
-    public function testValidate($adyenPblExpiresAt, $valid, $message = [])
+    #[DataProvider('adyenPblExpiresAtDataProvider')]
+    public function testValidate($dateModification, $valid, $message = [])
     {
+        $date = new \DateTime();
+        $date->modify($dateModification);
+        $adyenPblExpiresAt = $date->format(AdyenPayByLinkConfigProvider::DATE_TIME_FORMAT);
         $this->payment->method('getAdyenPblExpiresAt')->willReturn($adyenPblExpiresAt);
         $validationSubject['payment'] = $this->payment;
 
@@ -85,37 +90,37 @@ class PaymentLinksRequestValidatorTest extends AbstractAdyenTestCase
 
     public static function adyenPblExpiresAtDataProvider()
     {
-        $today = date(AdyenPayByLinkConfigProvider::DATE_FORMAT);
         return [
             [
-                date(
-                    AdyenPayByLinkConfigProvider::DATE_FORMAT,
-                    strtotime($today . ' + ' . (AdyenPayByLinkConfigProvider::MAX_EXPIRY_DAYS - 1) . ' days')
-                ),
+                '+' . (AdyenPayByLinkConfigProvider::MAX_EXPIRY_DAYS - 1) . ' days',
                 true
             ],
             [
-                date(
-                    AdyenPayByLinkConfigProvider::DATE_FORMAT,
-                    strtotime($today . ' + ' . (AdyenPayByLinkConfigProvider::MIN_EXPIRY_DAYS + 1) . ' days')
-                ),
+                '+' . (AdyenPayByLinkConfigProvider::MIN_EXPIRY_DAYS + 1) . ' days',
                 true
             ],
             [
-                date(
-                    AdyenPayByLinkConfigProvider::DATE_FORMAT,
-                    strtotime($today . ' + ' . (AdyenPayByLinkConfigProvider::MAX_EXPIRY_DAYS) . ' days')
-                ),
+                '+' . AdyenPayByLinkConfigProvider::MAX_EXPIRY_DAYS . ' days',
                 false,
                 ['Invalid expiry date selected for Adyen Pay By Link']
             ],
             [
-                date(
-                    AdyenPayByLinkConfigProvider::DATE_FORMAT,
-                    strtotime($today . ' + ' . (AdyenPayByLinkConfigProvider::MIN_EXPIRY_DAYS) . ' days')
-                ),
+                '+' . AdyenPayByLinkConfigProvider::MAX_EXPIRY_DAYS . ' days -1 minute',
                 true
             ],
+            [
+                ' + ' . AdyenPayByLinkConfigProvider::MIN_EXPIRY_DAYS . ' days',
+                true
+            ],
+            [
+                ' + ' . AdyenPayByLinkConfigProvider::MIN_EXPIRY_DAYS . ' days -5 minute',
+                false,
+                ['Invalid expiry date selected for Adyen Pay By Link']
+            ],
+            [
+                ' + ' . AdyenPayByLinkConfigProvider::MIN_EXPIRY_DAYS . ' days -' . AdyenPayByLinkConfigProvider::EXPIRY_BUFFER_IN_SECONDS . ' seconds',
+                true
+            ]
         ];
     }
 }

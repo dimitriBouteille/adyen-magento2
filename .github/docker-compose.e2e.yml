@@ -1,7 +1,7 @@
 version: '3'
 services:
   playwright:
-    image: mcr.microsoft.com/playwright:v1.56.0
+    image: mcr.microsoft.com/playwright:v1.56.1
     shm_size: 1gb
     ipc: host
     cap_add:
@@ -18,6 +18,9 @@ services:
       - ADYEN_API_KEY
       - ADYEN_CLIENT_KEY
       - ADYEN_MERCHANT
+      - ADYEN_MOTO_API_KEY
+      - ADYEN_MOTO_CLIENT_KEY
+      - ADYEN_MOTO_MERCHANT
       - GOOGLE_USERNAME
       - GOOGLE_PASSWORD
       - AMAZON_USERNAME
@@ -27,6 +30,5 @@ services:
       - CI
     volumes:
       - ./scripts/e2e.sh:/e2e.sh
-      - ../test-report:/tmp/test-report
 networks:
   backend:

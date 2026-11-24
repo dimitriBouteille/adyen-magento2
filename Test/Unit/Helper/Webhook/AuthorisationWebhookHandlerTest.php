@@ -22,6 +22,7 @@ use Adyen\Payment\Helper\Order as OrderHelper;
 use Adyen\Payment\Helper\CaseManagement;
 use Adyen\Payment\Helper\ChargedCurrency;
 use Adyen\Payment\Helper\Config;
+use Adyen\Payment\Helper\Data;
 use Adyen\Payment\Helper\Invoice;
 use Adyen\Payment\Helper\PaymentMethods;
 use Adyen\Payment\Logger\AdyenLogger;
@@ -29,7 +30,10 @@ use Magento\Framework\Serialize\SerializerInterface;
 use ReflectionClass;
 use ReflectionException as ReflectionExceptionAlias;
 use ReflectionMethod;
+use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\AllowMockObjectsWithoutExpectations;
 
+#[AllowMockObjectsWithoutExpectations]
 class AuthorisationWebhookHandlerTest extends AbstractAdyenTestCase
 {
     private Notification|MockObject $notificationMock;
@@ -73,6 +77,8 @@ class AuthorisationWebhookHandlerTest extends AbstractAdyenTestCase
             'getMethod' => 'adyen_cc'
         ]);
         $this->orderMock->method('getStoreId')->willReturn($storeId);
+        $this->orderMock->method('getQuoteId')->willReturn('123');
+        $this->quoteMock->method('getIsActive')->willReturn(false);
         $this->orderMock->method('getPayment')->willReturn($paymentMock);
 
         $this->notificationMock->expects($this->once())
@@ -108,14 +114,12 @@ class AuthorisationWebhookHandlerTest extends AbstractAdyenTestCase
         $this->assertInstanceOf(Order::class, $result);
     }
 
-    public function isAutoCaptureProvider(): array
+    public static function isAutoCaptureProvider(): array
     {
         return [[true], [false]];
     }
 
-    /**
-     * @dataProvider isAutoCaptureProvider
-     */
+    #[DataProvider('isAutoCaptureProvider')]
     public function testHandleSuccessfulAuthorisation($isAutoCapture): void
     {
         // Mock
@@ -124,6 +128,8 @@ class AuthorisationWebhookHandlerTest extends AbstractAdyenTestCase
             ->method('createAdyenOrderPayment');
         $this->adyenOrderPaymentMock->expects($this->once())
             ->method('isFullAmountAuthorized')
+            ->willReturn(true);
+        $this->adyenOrderPaymentMock->method('isAllAutoCaptured')
             ->willReturn(true);
 
         $orderAmountCurrency = new AdyenAmountCurrency(
@@ -142,7 +148,9 @@ class AuthorisationWebhookHandlerTest extends AbstractAdyenTestCase
         $paymentMock = $this->createMock(Order\Payment::class);
         $storeId = 1;
         $this->orderMock->method('getStoreId')->willReturn($storeId);
+        $this->orderMock->method('getQuoteId')->willReturn('123');
         $this->orderMock->method('getPayment')->willReturn($paymentMock);
+        $this->quoteMock->method('getIsActive')->willReturn(false);
 
         $this->orderHelperMock->expects($this->once())
             ->method('setPrePaymentAuthorized')->willReturn($this->orderMock);
@@ -288,19 +296,20 @@ class AuthorisationWebhookHandlerTest extends AbstractAdyenTestCase
         $this->assertInstanceOf(Order::class, $result);
     }
 
-    public function testDisableQuote()
+    public function testDisableQuote(): void
     {
         $this->orderMock->expects($this->any())->method('getPayment')->willReturn($this->orderMock);
         $this->orderMock->expects($this->any())->method('getConfig')->willReturnSelf();
+
+        $this->orderMock->method('getQuoteId')->willReturn('123');
 
         $this->quoteMock->expects($this->any())->method('getIsActive')->willReturn(true);
         $this->quoteMock->expects($this->any())->method('setIsActive')->with(false);
 
         $cartRepositoryMock = $this->createMock(CartRepositoryInterface::class);
-        $cartRepositoryMock->expects($this->once())->method('get')->willReturn($this->quoteMock);
+        $cartRepositoryMock->expects($this->once())->method('get')->with('123')->willReturn($this->quoteMock);
         $cartRepositoryMock->expects($this->once())->method('save')->with($this->quoteMock);
 
-        // Create an instance of AuthorisationWebhookHandler
         $webhookHandler = $this->createAuthorisationWebhookHandler(
             null,
             null,
@@ -313,7 +322,12 @@ class AuthorisationWebhookHandlerTest extends AbstractAdyenTestCase
             $cartRepositoryMock
         );
 
-        $result = $webhookHandler->handleWebhook($this->orderMock, $this->notificationMock, 'paid');
+        $result = $webhookHandler->handleWebhook(
+            $this->orderMock,
+            $this->notificationMock,
+            PaymentStates::STATE_PAID
+        );
+
         $this->assertInstanceOf(Order::class, $result);
     }
 
@@ -397,6 +411,507 @@ class AuthorisationWebhookHandlerTest extends AbstractAdyenTestCase
         // Perform assertions on the result and expected behavior
         $this->assertIsBool($result);
     }
+    public function testHandleWebhookFailedRoutesToFailedHandler(): void
+    {
+        $orderHelper = $this->createMock(OrderHelper::class);
+        $cleanup = $this->createMock(CleanupAdditionalInformationInterface::class);
+        $config = $this->createMock(Config::class);
+
+        // Important: prevent null->getMethod()
+        $paymentMock = $this->createConfiguredMock(Order\Payment::class, [
+            'getMethod' => AdyenCcConfigProvider::CODE // non-PBL path
+        ]);
+        $this->orderMock->method('getPayment')->willReturn($paymentMock);
+
+        // Make sure we don't exit early
+        $this->orderMock->method('isCanceled')->willReturn(false);
+        $this->orderMock->method('getState')->willReturn(Order::STATE_NEW);
+
+        $this->orderMock->method('getData')->willReturnMap([
+            ['adyen_notification_event_code', null, false],
+            ['adyen_notification_payment_captured', null, false],
+        ]);
+
+        // Ensure we don't hit the "move from PAYMENT_REVIEW to NEW" path unexpectedly
+        $this->orderMock->method('canCancel')->willReturn(true);
+        $config->method('getNotificationsCanCancel')->willReturn(false);
+
+        $cleanup->expects($this->once())->method('execute')->with($paymentMock);
+
+        $orderHelper->expects($this->once())
+            ->method('holdCancelOrder')
+            ->with($this->orderMock, true)
+            ->willReturn($this->orderMock);
+
+        $handler = $this->createAuthorisationWebhookHandler(
+            null,
+            $orderHelper,
+            null,
+            null,
+            null,
+            $config,
+            null,
+            null,
+            null,
+            null,
+            $cleanup
+        );
+
+        $result = $handler->handleWebhook(
+            $this->orderMock,
+            $this->notificationMock,
+            PaymentStates::STATE_FAILED
+        );
+
+        $this->assertInstanceOf(Order::class, $result);
+    }
+
+    /**
+     * Full amount NOT authorized -> just adds webhook history comment (no finalize/invoice/cleanup)
+     * @throws ReflectionExceptionAlias
+     */
+    public function testHandleSuccessfulAuthorisationNotFullAmountAuthorizedAddsHistoryCommentOnly(): void
+    {
+        $adyenOrderPayment = $this->createMock(AdyenOrderPayment::class);
+        $adyenOrderPayment->expects($this->once())->method('createAdyenOrderPayment');
+        $adyenOrderPayment->expects($this->once())
+            ->method('isFullAmountAuthorized')
+            ->willReturn(false);
+
+        $orderHelper = $this->createMock(OrderHelper::class);
+        $orderHelper->expects($this->once())
+            ->method('addWebhookStatusHistoryComment')
+            ->with($this->orderMock, $this->notificationMock)
+            ->willReturn($this->orderMock);
+
+        $orderHelper->expects($this->never())->method('finalizeOrder');
+        $orderHelper->expects($this->never())->method('sendOrderMail');
+
+        $paymentMethods = $this->createConfiguredMock(PaymentMethods::class, [
+            'isAutoCapture' => true
+        ]);
+
+        $handler = $this->createAuthorisationWebhookHandler(
+            $adyenOrderPayment,
+            $orderHelper,
+            null,
+            null,
+            null,
+            null,
+            null,
+            $paymentMethods
+        );
+
+        $method = $this->getPrivateMethod(AuthorisationWebhookHandler::class, 'handleSuccessfulAuthorisation');
+        $result = $method->invokeArgs($handler, [$this->orderMock, $this->notificationMock]);
+
+        $this->assertInstanceOf(Order::class, $result);
+    }
+
+    /**
+     * Boleto -> order mail should NOT be sent.
+     * @throws ReflectionExceptionAlias
+     */
+    public function testHandleSuccessfulAuthorisationBoletoDoesNotSendOrderMail(): void
+    {
+        $notification = $this->createConfiguredMock(Notification::class, [
+            'getPaymentMethod' => 'adyen_boleto',
+            'isSuccessful' => true,
+            'getAdditionalData' => null
+        ]);
+
+        $adyenOrderPayment = $this->createMock(AdyenOrderPayment::class);
+        $adyenOrderPayment->method('isFullAmountAuthorized')->willReturn(true);
+        $adyenOrderPayment->method('isAllAutoCaptured')->willReturn(true);
+
+        $paymentMethods = $this->createConfiguredMock(PaymentMethods::class, [
+            'isAutoCapture' => true
+        ]);
+
+        $orderHelper = $this->createMock(OrderHelper::class);
+        $orderHelper->method('setPrePaymentAuthorized')->willReturn($this->orderMock);
+        $orderHelper->expects($this->never())->method('sendOrderMail');
+        $orderHelper->method('finalizeOrder')->willReturn($this->orderMock);
+
+        $invoiceHelper = $this->createMock(Invoice::class);
+        $invoiceHelper->expects($this->once())->method('createInvoice');
+
+        $cleanup = $this->createMock(CleanupAdditionalInformationInterface::class);
+        $cleanup->expects($this->once())->method('execute');
+
+        $payment = $this->createMock(Order\Payment::class);
+        $payment->expects($this->once())->method('setAmountAuthorized');
+        $payment->expects($this->once())->method('setBaseAmountAuthorized');
+
+        $this->orderMock->method('getPayment')->willReturn($payment);
+        $this->orderMock->method('getEmailSent')->willReturn(false);
+        $this->orderMock->method('getGrandTotal')->willReturn(10.0);
+        $this->orderMock->method('getBaseGrandTotal')->willReturn(10.0);
+        $this->orderMock->method('getQuoteId')->willReturn(null);
+
+        $handler = $this->createAuthorisationWebhookHandler(
+            $adyenOrderPayment,
+            $orderHelper,
+            $this->createMock(CaseManagement::class),
+            $this->createMock(SerializerInterface::class),
+            $this->createMock(AdyenLogger::class),
+            $this->createMock(Config::class),
+            $invoiceHelper,
+            $paymentMethods,
+            $this->createMock(CartRepositoryInterface::class),
+            null,
+            $cleanup
+        );
+
+        $method = $this->getPrivateMethod(AuthorisationWebhookHandler::class, 'handleSuccessfulAuthorisation');
+        $result = $method->invokeArgs($handler, [$this->orderMock, $notification]);
+
+        $this->assertInstanceOf(Order::class, $result);
+    }
+
+    /**
+     * c_cash + create_shipment enabled -> createShipment called
+     * @throws ReflectionExceptionAlias
+     */
+    public function testHandleSuccessfulAuthorisationCashCreatesShipmentWhenConfigured(): void
+    {
+        $notification = $this->createConfiguredMock(Notification::class, [
+            'getPaymentMethod' => 'c_cash',
+            'isSuccessful' => true,
+            'getAdditionalData' => null
+        ]);
+
+        $adyenOrderPayment = $this->createMock(AdyenOrderPayment::class);
+        $adyenOrderPayment->method('isFullAmountAuthorized')->willReturn(true);
+        $adyenOrderPayment->method('isAllAutoCaptured')->willReturn(true);
+
+        $paymentMethods = $this->createConfiguredMock(PaymentMethods::class, [
+            'isAutoCapture' => true
+        ]);
+
+        $config = $this->createMock(Config::class);
+        $config->expects($this->once())
+            ->method('getConfigData')
+            ->with('create_shipment', 'adyen_cash', $this->anything())
+            ->willReturn(true);
+
+        $orderHelper = $this->createMock(OrderHelper::class);
+        $orderHelper->method('setPrePaymentAuthorized')->willReturn($this->orderMock);
+        $orderHelper->method('finalizeOrder')->willReturn($this->orderMock);
+        $orderHelper->expects($this->once())->method('createShipment')->with($this->orderMock);
+
+        $payment = $this->createMock(Order\Payment::class);
+        $payment->expects($this->once())->method('setAmountAuthorized');
+        $payment->expects($this->once())->method('setBaseAmountAuthorized');
+
+        $this->orderMock->method('getPayment')->willReturn($payment);
+        $this->orderMock->method('getStoreId')->willReturn(1);
+        $this->orderMock->method('getEmailSent')->willReturn(true);
+        $this->orderMock->method('getGrandTotal')->willReturn(10.0);
+        $this->orderMock->method('getBaseGrandTotal')->willReturn(10.0);
+        $this->orderMock->method('getQuoteId')->willReturn(null);
+
+        $handler = $this->createAuthorisationWebhookHandler(
+            $adyenOrderPayment,
+            $orderHelper,
+            $this->createMock(CaseManagement::class),
+            $this->createMock(SerializerInterface::class),
+            $this->createMock(AdyenLogger::class),
+            $config,
+            $this->createMock(Invoice::class),
+            $paymentMethods,
+            $this->createMock(CartRepositoryInterface::class),
+            null,
+            $this->createMock(CleanupAdditionalInformationInterface::class)
+        );
+
+        $method = $this->getPrivateMethod(AuthorisationWebhookHandler::class, 'handleSuccessfulAuthorisation');
+        $result = $method->invokeArgs($handler, [$this->orderMock, $notification]);
+
+        $this->assertInstanceOf(Order::class, $result);
+    }
+
+    /**
+     * Quote is active -> setIsActive(false) and save.
+     * @throws ReflectionExceptionAlias
+     */
+    public function testHandleSuccessfulAuthorisationDeactivatesActiveQuote(): void
+    {
+        $adyenOrderPayment = $this->createMock(AdyenOrderPayment::class);
+        $adyenOrderPayment->method('isFullAmountAuthorized')->willReturn(true);
+        $adyenOrderPayment->method('isAllAutoCaptured')->willReturn(true);
+
+        $paymentMethods = $this->createConfiguredMock(PaymentMethods::class, [
+            'isAutoCapture' => true
+        ]);
+
+        $orderHelper = $this->createMock(OrderHelper::class);
+        $orderHelper->method('setPrePaymentAuthorized')->willReturn($this->orderMock);
+        $orderHelper->method('finalizeOrder')->willReturn($this->orderMock);
+
+        $payment = $this->createMock(Order\Payment::class);
+        $payment->expects($this->once())->method('setAmountAuthorized');
+        $payment->expects($this->once())->method('setBaseAmountAuthorized');
+
+        $this->orderMock->method('getPayment')->willReturn($payment);
+        $this->orderMock->method('getEmailSent')->willReturn(true);
+        $this->orderMock->method('getGrandTotal')->willReturn(10.0);
+        $this->orderMock->method('getBaseGrandTotal')->willReturn(10.0);
+        $this->orderMock->method('getQuoteId')->willReturn(123);
+
+        $quote = $this->createMock(Quote::class);
+        $quote->method('getIsActive')->willReturn(true);
+        $quote->expects($this->once())->method('setIsActive')->with(false);
+
+        $cartRepo = $this->createMock(CartRepositoryInterface::class);
+        $cartRepo->expects($this->once())->method('get')->with(123)->willReturn($quote);
+        $cartRepo->expects($this->once())->method('save')->with($quote);
+
+        $handler = $this->createAuthorisationWebhookHandler(
+            $adyenOrderPayment,
+            $orderHelper,
+            $this->createMock(CaseManagement::class),
+            $this->createMock(SerializerInterface::class),
+            $this->createMock(AdyenLogger::class),
+            $this->createMock(Config::class),
+            $this->createMock(Invoice::class),
+            $paymentMethods,
+            $cartRepo,
+            null,
+            $this->createMock(CleanupAdditionalInformationInterface::class)
+        );
+
+        $method = $this->getPrivateMethod(AuthorisationWebhookHandler::class, 'handleSuccessfulAuthorisation');
+        $result = $method->invokeArgs($handler, [$this->orderMock, $this->notificationMock]);
+
+        $this->assertInstanceOf(Order::class, $result);
+    }
+
+    /**
+     * cartRepository->get throws -> logger addAdyenNotification called.
+     * @throws ReflectionExceptionAlias
+     */
+    public function testHandleSuccessfulAuthorisationQuoteDeactivationExceptionLogs(): void
+    {
+        $adyenOrderPayment = $this->createMock(AdyenOrderPayment::class);
+        $adyenOrderPayment->method('isFullAmountAuthorized')->willReturn(true);
+        $adyenOrderPayment->method('isAllAutoCaptured')->willReturn(true);
+
+        $paymentMethods = $this->createConfiguredMock(PaymentMethods::class, [
+            'isAutoCapture' => true
+        ]);
+
+        $orderHelper = $this->createMock(OrderHelper::class);
+        $orderHelper->method('setPrePaymentAuthorized')->willReturn($this->orderMock);
+        $orderHelper->method('finalizeOrder')->willReturn($this->orderMock);
+
+        $payment = $this->createMock(Order\Payment::class);
+        $payment->expects($this->once())->method('setAmountAuthorized');
+        $payment->expects($this->once())->method('setBaseAmountAuthorized');
+
+        $this->orderMock->method('getPayment')->willReturn($payment);
+        $this->orderMock->method('getEmailSent')->willReturn(true);
+        $this->orderMock->method('getGrandTotal')->willReturn(10.0);
+        $this->orderMock->method('getBaseGrandTotal')->willReturn(10.0);
+        $this->orderMock->method('getQuoteId')->willReturn(123);
+
+        $cartRepo = $this->createMock(CartRepositoryInterface::class);
+        $cartRepo->expects($this->once())
+            ->method('get')
+            ->willThrowException(new \Exception('boom'));
+
+        $logger = $this->createMock(AdyenLogger::class);
+        $logger->expects($this->once())
+            ->method('addAdyenNotification')
+            ->with(
+                $this->stringContains('Quote deactivation skipped'),
+                $this->arrayHasKey('quoteId')
+            );
+
+        $handler = $this->createAuthorisationWebhookHandler(
+            $adyenOrderPayment,
+            $orderHelper,
+            $this->createMock(CaseManagement::class),
+            $this->createMock(SerializerInterface::class),
+            $logger,
+            $this->createMock(Config::class),
+            $this->createMock(Invoice::class),
+            $paymentMethods,
+            $cartRepo,
+            null,
+            $this->createMock(CleanupAdditionalInformationInterface::class)
+        );
+
+        $method = $this->getPrivateMethod(AuthorisationWebhookHandler::class, 'handleSuccessfulAuthorisation');
+        $result = $method->invokeArgs($handler, [$this->orderMock, $this->notificationMock]);
+
+        $this->assertInstanceOf(Order::class, $result);
+    }
+
+    /**
+     * Failed auth: order already cancelled -> no cancel call
+     * @throws ReflectionExceptionAlias
+     */
+    public function testHandleFailedAuthorisationOrderAlreadyCancelledDoesNothing(): void
+    {
+        $this->orderMock->method('isCanceled')->willReturn(true);
+
+        $orderHelper = $this->createMock(OrderHelper::class);
+        $orderHelper->expects($this->never())->method('holdCancelOrder');
+
+        $handler = $this->createAuthorisationWebhookHandler(null, $orderHelper);
+
+        $method = $this->getPrivateMethod(AuthorisationWebhookHandler::class, 'handleFailedAuthorisation');
+        $result = $method->invokeArgs($handler, [$this->orderMock, $this->notificationMock]);
+
+        $this->assertInstanceOf(Order::class, $result);
+    }
+
+    /**
+     * PayByLink: failure count below MAX -> notification saved and no cancellation
+     * @throws ReflectionExceptionAlias
+     */
+    public function testHandleFailedAuthorisationPayByLinkBelowMaxDoesNotCancel(): void
+    {
+        $payment = $this->createMock(Order\Payment::class);
+        $payment->method('getMethod')->willReturn(AdyenPayByLinkConfigProvider::CODE);
+        $payment->method('getAdditionalInformation')->with('payByLinkFailureCount')->willReturn(1);
+        $payment->expects($this->once())->method('setAdditionalInformation');
+
+        $this->orderMock->method('getPayment')->willReturn($payment);
+        $this->orderMock->method('isCanceled')->willReturn(false);
+        $this->orderMock->method('getState')->willReturn(Order::STATE_NEW);
+
+        $this->orderMock->method('getData')->willReturnMap([
+            ['adyen_notification_event_code', null, false],
+            ['adyen_notification_payment_captured', null, false],
+        ]);
+
+        $repo = $this->createMock(AdyenNotificationRepositoryInterface::class);
+        $repo->expects($this->once())->method('save')->with($this->notificationMock);
+
+        $orderHelper = $this->createMock(OrderHelper::class);
+        $orderHelper->expects($this->never())->method('holdCancelOrder');
+
+        $handler = $this->createAuthorisationWebhookHandler(
+            null,
+            $orderHelper,
+            null,
+            null,
+            $this->createMock(AdyenLogger::class),
+            $this->createMock(Config::class),
+            null,
+            null,
+            null,
+            $repo
+        );
+
+        $method = $this->getPrivateMethod(AuthorisationWebhookHandler::class, 'handleFailedAuthorisation');
+        $result = $method->invokeArgs($handler, [$this->orderMock, $this->notificationMock]);
+
+        $this->assertInstanceOf(Order::class, $result);
+    }
+
+    /**
+     * PayByLink: failure count reaches MAX -> proceeds to cancel
+     * @throws ReflectionExceptionAlias
+     */
+    public function testHandleFailedAuthorisationPayByLinkAtMaxCancels(): void
+    {
+        $payment = $this->createMock(Order\Payment::class);
+        $payment->method('getMethod')->willReturn(AdyenPayByLinkConfigProvider::CODE);
+        $payment->method('getAdditionalInformation')->with('payByLinkFailureCount')->willReturn(
+            AdyenPayByLinkConfigProvider::MAX_FAILURE_COUNT - 1
+        );
+        $payment->expects($this->once())->method('setAdditionalInformation');
+
+        $this->orderMock->method('getPayment')->willReturn($payment);
+        $this->orderMock->method('isCanceled')->willReturn(false);
+        $this->orderMock->method('getState')->willReturn(Order::STATE_NEW);
+
+        $this->orderMock->method('getData')->willReturnMap([
+            ['adyen_notification_event_code', null, false],
+            ['adyen_notification_payment_captured', null, false],
+        ]);
+
+        $cleanup = $this->createMock(CleanupAdditionalInformationInterface::class);
+        $cleanup->expects($this->once())->method('execute');
+
+        $orderHelper = $this->createMock(OrderHelper::class);
+        $orderHelper->expects($this->once())->method('holdCancelOrder')->willReturn($this->orderMock);
+
+        $handler = $this->createAuthorisationWebhookHandler(
+            null,
+            $orderHelper,
+            null,
+            null,
+            null,
+            $this->createMock(Config::class),
+            null,
+            null,
+            null,
+            $this->createMock(AdyenNotificationRepositoryInterface::class),
+            $cleanup
+        );
+
+        $method = $this->getPrivateMethod(AuthorisationWebhookHandler::class, 'handleFailedAuthorisation');
+        $result = $method->invokeArgs($handler, [$this->orderMock, $this->notificationMock]);
+
+        $this->assertInstanceOf(Order::class, $result);
+    }
+
+    /**
+     * Mixed partial payments: isAllAutoCaptured returns false -> handleManualCapture is used.
+     * This verifies the fix for the race condition where capture mode depends on webhook order.
+     * @throws ReflectionExceptionAlias
+     */
+    public function testHandleSuccessfulAuthorisationMixedCaptureUsesManualCapture(): void
+    {
+        $adyenOrderPayment = $this->createMock(AdyenOrderPayment::class);
+        $adyenOrderPayment->method('isFullAmountAuthorized')->willReturn(true);
+        $adyenOrderPayment->method('isAllAutoCaptured')->willReturn(false);
+
+        $paymentMethods = $this->createConfiguredMock(PaymentMethods::class, [
+            'isAutoCapture' => true
+        ]);
+
+        $orderHelper = $this->createMock(OrderHelper::class);
+        $orderHelper->method('setPrePaymentAuthorized')->willReturn($this->orderMock);
+        $orderHelper->expects($this->never())->method('finalizeOrder');
+        $orderHelper->method('addWebhookStatusHistoryComment')->willReturn($this->orderMock);
+
+        $invoiceHelper = $this->createMock(Invoice::class);
+        $invoiceHelper->expects($this->never())->method('createInvoice');
+
+        $payment = $this->createMock(Order\Payment::class);
+        $payment->expects($this->once())->method('setAmountAuthorized');
+        $payment->expects($this->once())->method('setBaseAmountAuthorized');
+
+        $this->orderMock->method('getPayment')->willReturn($payment);
+        $this->orderMock->method('getEmailSent')->willReturn(true);
+        $this->orderMock->method('getGrandTotal')->willReturn(10.0);
+        $this->orderMock->method('getBaseGrandTotal')->willReturn(10.0);
+        $this->orderMock->method('getQuoteId')->willReturn(null);
+
+        $handler = $this->createAuthorisationWebhookHandler(
+            $adyenOrderPayment,
+            $orderHelper,
+            $this->createMock(CaseManagement::class),
+            $this->createMock(SerializerInterface::class),
+            $this->createMock(AdyenLogger::class),
+            $this->createMock(Config::class),
+            $invoiceHelper,
+            $paymentMethods,
+            $this->createMock(CartRepositoryInterface::class),
+            null,
+            $this->createMock(CleanupAdditionalInformationInterface::class)
+        );
+
+        $method = $this->getPrivateMethod(AuthorisationWebhookHandler::class, 'handleSuccessfulAuthorisation');
+        $result = $method->invokeArgs($handler, [$this->orderMock, $this->notificationMock]);
+
+        $this->assertInstanceOf(Order::class, $result);
+    }
 
     /**
      * @throws ReflectionExceptionAlias
@@ -405,7 +920,6 @@ class AuthorisationWebhookHandlerTest extends AbstractAdyenTestCase
     {
         $reflectionClass = new ReflectionClass($className);
         $method = $reflectionClass->getMethod($methodName);
-        $method->setAccessible(true);
         return $method;
     }
 
@@ -420,7 +934,8 @@ class AuthorisationWebhookHandlerTest extends AbstractAdyenTestCase
         $mockPaymentMethodsHelper = null,
         $mockCartRepositoryMock = null,
         $adyenNotificationRepositoryMock = null,
-        $cleanupAdditionalInformation = null
+        $cleanupAdditionalInformation = null,
+        $adyenHelper = null
     ): AuthorisationWebhookHandler {
         if (is_null($mockAdyenOrderPayment)) {
             $mockAdyenOrderPayment = $this->createMock(AdyenOrderPayment::class);
@@ -466,6 +981,10 @@ class AuthorisationWebhookHandlerTest extends AbstractAdyenTestCase
             $cleanupAdditionalInformation = $this->createMock(CleanupAdditionalInformationInterface::class);
         }
 
+        if (is_null($adyenHelper)) {
+            $adyenHelper = $this->createMock(Data::class);
+        }
+
         return new AuthorisationWebhookHandler(
             $mockAdyenOrderPayment,
             $mockOrderHelper,
@@ -477,7 +996,8 @@ class AuthorisationWebhookHandlerTest extends AbstractAdyenTestCase
             $mockPaymentMethodsHelper,
             $mockCartRepositoryMock,
             $adyenNotificationRepositoryMock,
-            $cleanupAdditionalInformation
+            $cleanupAdditionalInformation,
+            $adyenHelper
         );
     }
 }

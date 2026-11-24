@@ -11,7 +11,9 @@
 
 namespace Adyen\Payment\Gateway\Response;
 
+use Adyen\Payment\Helper\OrdersApi;
 use Adyen\Payment\Helper\PaymentMethods;
+use Adyen\Payment\Helper\PaymentResponseHandler;
 use Adyen\Payment\Helper\Vault;
 use Magento\Framework\Exception\LocalizedException;
 use Magento\Payment\Gateway\Helper\SubjectReader;
@@ -22,11 +24,13 @@ class CheckoutPaymentsResponseHandler implements HandlerInterface
 {
     /**
      * @param Vault $vaultHelper
-     * @param PaymentMethods $paymentMethodsHelper
+     * @param PaymentResponseHandler $paymentResponseHandler
+     * @param OrdersApi $ordersApi
      */
     public function __construct(
         private readonly Vault $vaultHelper,
-        private readonly PaymentMethods $paymentMethodsHelper
+        private readonly PaymentResponseHandler $paymentResponseHandler,
+        private readonly OrdersApi $ordersApi
     ) { }
 
     /**
@@ -43,10 +47,8 @@ class CheckoutPaymentsResponseHandler implements HandlerInterface
         $paymentDataObject = SubjectReader::readPayment($handlingSubject);
         /** @var Payment $payment */
         $payment = $paymentDataObject->getPayment();
-        $paymentMethodInstance = $payment->getMethodInstance();
 
         $payment->getOrder()->setAdyenResulturlEventCode($response['resultCode']);
-        $payment->setAdditionalInformation('resultCode', $response['resultCode']);
         $payment->setAdditionalInformation('3dActive', false);
 
         // Set the transaction not to processing by default wait for notification
@@ -56,42 +58,20 @@ class CheckoutPaymentsResponseHandler implements HandlerInterface
         // Do not close the parent transaction
         $payment->setShouldCloseParentTransaction(false);
 
+        $this->paymentResponseHandler->setPaymentAdditionalInformation($payment, $response);
+
         if (!empty($response['pspReference'])) {
             $payment->setCcTransId($response['pspReference']);
             $payment->setLastTransId($response['pspReference']);
-            $payment->setTransactionId($response['pspReference']);
-            $payment->setAdditionalInformation('pspReference', $response['pspReference']);
         }
 
-        $ccType = $payment->getAdditionalInformation('cc_type');
-
-        $isWalletPaymentMethod = $this->paymentMethodsHelper->isWalletPaymentMethod($paymentMethodInstance);
-        $isCardPaymentMethod = $payment->getMethod() === PaymentMethods::ADYEN_CC ||
-            $payment->getMethod() === PaymentMethods::ADYEN_CC_VAULT;
-
-        if (!empty($response['additionalData']['paymentMethod']) &&
-            is_null($ccType) &&
-            ($isWalletPaymentMethod || $isCardPaymentMethod)
-        ) {
-            $ccType = $response['additionalData']['paymentMethod'];
-            $payment->setAdditionalInformation('cc_type', $ccType);
-            $payment->setCcType($ccType);
-        }
-
-        if (!empty($response['action'])) {
-            $payment->setAdditionalInformation('action', $response['action']);
-        }
-
-        if (!empty($response['additionalData'])) {
-            $payment->setAdditionalInformation('additionalData', $response['additionalData']);
-        }
-
-        if (!empty($response['details'])) {
-            $payment->setAdditionalInformation('details', $response['details']);
-        }
-
-        if (!empty($response['donationToken'])) {
-            $payment->setAdditionalInformation('donationToken', $response['donationToken']);
+        // Store Checkout API Order data to be used in case of cancellation after `/payments/details` call.
+        if (!empty($this->ordersApi->getCheckoutApiOrder()) &&
+            in_array($response['resultCode'], PaymentResponseHandler::ACTION_REQUIRED_STATUSES)) {
+            $payment->setAdditionalInformation(
+                OrdersApi::DATA_KEY_CHECKOUT_API_ORDER,
+                $this->ordersApi->getCheckoutApiOrder()
+            );
         }
 
         // Handle recurring payment details

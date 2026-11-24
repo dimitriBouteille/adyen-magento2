@@ -26,6 +26,7 @@ class ChargedCurrency
      * Charged currency value when Global/Website is selected
      */
     const BASE = "base";
+    const DISPLAY = 'display';
 
     public function __construct(
         private readonly Config $config,
@@ -113,7 +114,7 @@ class ChargedCurrency
                 $item->getBaseDiscountAmount() / $item->getQty(),
                 $item->getBaseTaxAmount() / $item->getQty(),
                 null,
-                $priceRenderer->getBaseTotalAmount($item)
+                $priceRenderer->getBaseTotalAmount($item) / $item->getQty()
             );
         }
 
@@ -123,7 +124,7 @@ class ChargedCurrency
             $item->getDiscountAmount() / $item->getQty(),
             $item->getTaxAmount() / $item->getQty(),
             null,
-            $priceRenderer->getTotalAmount($item)
+            $priceRenderer->getTotalAmount($item) / $item->getQty()
         );
     }
 
@@ -206,7 +207,7 @@ class ChargedCurrency
                 $item->getBaseDiscountAmount() / $item->getQty(),
                 $item->getBaseTaxAmount() / $item->getQty(),
                 null,
-                $priceRenderer->getBaseTotalAmount($item)
+                $priceRenderer->getBaseTotalAmount($item) / $item->getQty()
             );
         }
         return new AdyenAmountCurrency(
@@ -215,7 +216,7 @@ class ChargedCurrency
             $item->getDiscountAmount() / $item->getQty(),
             $item->getTaxAmount() / $item->getQty(),
             null,
-            $priceRenderer->getTotalAmount($item)
+            $priceRenderer->getTotalAmount($item) / $item->getQty()
         );
     }
 

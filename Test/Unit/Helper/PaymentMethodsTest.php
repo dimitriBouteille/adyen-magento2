@@ -6,14 +6,25 @@ namespace Adyen\Payment\Test\Unit\Helper;
 
 use Adyen\Client;
 use Adyen\Payment\Logger\AdyenLogger;
-use Adyen\Payment\Helper\{ChargedCurrency, Config, Data, Locale, PaymentMethods, PlatformInfo};
-use Adyen\Payment\Model\{AdyenAmountCurrency, Notification, Ui\Adminhtml\AdyenMotoConfigProvider, Ui\AdyenPayByLinkConfigProvider};
+use Adyen\Payment\Helper\{Address, ChargedCurrency, Config, Data, Locale, PaymentMethods, PlatformInfo};
+use Adyen\Payment\Model\{AdyenAmountCurrency,
+    Config\Source\CaptureMode,
+    Config\Source\SepaFlow,
+    Method\TxVariant,
+    Method\TxVariantFactory,
+    Notification,
+    Ui\Adminhtml\AdyenMotoConfigProvider,
+    Ui\AdyenPayByLinkConfigProvider,
+    Ui\AdyenPosCloudConfigProvider};
 use Adyen\Payment\Test\Unit\AbstractAdyenTestCase;
 use Magento\Framework\Api\SearchCriteriaBuilder;
 use Magento\Framework\App\Helper\Context;
 use Magento\Framework\App\Config\ScopeConfigInterface;
+use Magento\Framework\App\RequestInterface;
 use Magento\Framework\Serialize\SerializerInterface;
 use Magento\Framework\View\DesignInterface;
+use Magento\Quote\Api\Data\AddressInterface;
+use Magento\Quote\Api\Data\CartInterface;
 use Magento\Framework\View\Asset\{Repository, Source, LocalInterface};
 use Magento\Framework\View\Design\{Theme\ThemeProviderInterface};
 use Magento\Payment\Helper\Data as MagentoDataHelper;
@@ -30,8 +41,11 @@ use ReflectionClass;
 use ReflectionMethod;
 use Magento\Checkout\Model\Session as CheckoutSession;
 use Adyen\Payment\Helper\ShopperConversionId;
+use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\AllowMockObjectsWithoutExpectations;
 
 #[CoversClass(PaymentMethods::class)]
+#[AllowMockObjectsWithoutExpectations]
 class PaymentMethodsTest extends AbstractAdyenTestCase
 {
     private PaymentMethods $helper;
@@ -59,6 +73,9 @@ class PaymentMethodsTest extends AbstractAdyenTestCase
     private MockObject $checkoutSession;
     private MockObject $generateShopperConversionId;
     private MockObject $cartRepository;
+    private MockObject $requestInterfaceMock;
+    private MockObject $txVariantFactory;
+    private MockObject $addressHelper;
 
     protected function setUp(): void
     {
@@ -72,9 +89,10 @@ class PaymentMethodsTest extends AbstractAdyenTestCase
         $this->chargedCurrencyMock = $this->createMock(ChargedCurrency::class);
         $this->localeHelper = $this->createMock(Locale::class);
 
-        $this->quoteMock = $this->getMockBuilder(Quote::class)
-            ->addMethods(['getCustomerId'])
-            ->onlyMethods(['getStore','getBillingAddress','getEntityId'])
+        $this->quoteMock = $this->getMockBuilder(
+            $this->createClassWithMagicMethods(Quote::class, ['getCustomerId'])
+        )
+            ->onlyMethods(['getStore','getBillingAddress','getEntityId','getCustomerId'])
             ->disableOriginalConstructor()
             ->getMock();
 
@@ -106,6 +124,12 @@ class PaymentMethodsTest extends AbstractAdyenTestCase
             ->willReturn(null);
         $sessionQuote->method('getPayment')->willReturn($sessionPayment);
         $this->checkoutSession->method('getQuote')->willReturn($sessionQuote);
+        $this->requestInterfaceMock = $this->createMock(RequestInterface::class);
+        $this->txVariantFactory = $this->createMock(TxVariantFactory::class);
+        $this->addressHelper = $this->createMock(Address::class);
+        $this->addressHelper->method('getAdyenCountryCode')->willReturnCallback(
+            fn (string $countryCode): string => $countryCode === 'XK' ? 'QZ' : $countryCode
+        );
 
         $this->helper = new PaymentMethods(
             $this->createMock(Context::class),
@@ -125,7 +149,10 @@ class PaymentMethodsTest extends AbstractAdyenTestCase
             $this->searchCriteriaBuilder,
             $this->localeHelper,
             $this->generateShopperConversionId,
-            $this->checkoutSession
+            $this->checkoutSession,
+            $this->requestInterfaceMock,
+            $this->txVariantFactory,
+            $this->addressHelper
         );
     }
 
@@ -270,6 +297,19 @@ class PaymentMethodsTest extends AbstractAdyenTestCase
         $this->assertEquals(['adyen_cc', 'adyen_ideal'], $result);
     }
 
+    public function testGetOpenInvoicePaymentMethods(): void
+    {
+        $this->magentoDataHelper->method('getPaymentMethods')->willReturn([
+            'adyen_klarna' => [PaymentMethods::CONFIG_FIELD_IS_OPEN_INVOICE => '1'],
+            'adyen_ideal' => [PaymentMethods::CONFIG_FIELD_IS_OPEN_INVOICE => '0'],
+            'adyen_cc' => ['active' => '1'],
+            'adyen_riverty' => [PaymentMethods::CONFIG_FIELD_IS_OPEN_INVOICE => '1'],
+            'other_invoice' => [PaymentMethods::CONFIG_FIELD_IS_OPEN_INVOICE => '1']
+        ]);
+
+        $this->assertSame(['adyen_klarna', 'adyen_riverty'], $this->helper->getOpenInvoicePaymentMethods());
+    }
+
     public function testBuildPaymentMethodIconFallbackToExternal(): void
     {
         $asset = $this->createMock(LocalInterface::class); // instead of AssetInterface
@@ -295,6 +335,15 @@ class PaymentMethodsTest extends AbstractAdyenTestCase
         ]);
 
         $this->assertTrue($this->helper->getRequiresLineItems($this->methodMock));
+    }
+
+    public function testGetRefundRequiresCapturePspreference(): void
+    {
+        $this->methodMock->method('getConfigData')
+            ->with(PaymentMethods::CONFIG_FIELD_REFUND_REQUIRES_CAPTURE_PSPREFERENCE)
+            ->willReturn(true);
+
+        $this->assertTrue($this->helper->getRefundRequiresCapturePspreference($this->methodMock));
     }
 
     public function testCheckPaymentMethodNegative(): void
@@ -360,47 +409,55 @@ class PaymentMethodsTest extends AbstractAdyenTestCase
         $this->assertEquals('overpaid_status', $status);
     }
 
-    /**
-     * @dataProvider autoCaptureDataProvider
-     */
+    #[DataProvider('autoCaptureDataProvider')]
     public function testIsAutoCapture(
-        $manualCaptureSupported,
-        $captureMode,
-        $sepaFlow,
-        $paymentCode,
-        $autoCaptureOpenInvoice,
-        $manualCapturePayPal,
-        $expectedResult
+        string $webhookPaymentMethod,
+        ?string $webhookMethodCode,
+        bool $isOpenInvoice,
+        ?string $captureMode,
+        ?string $sepaFlow,
+        bool $isPaypalManualCapture,
+        bool $autoCaptureOpenInvoice,
+        string $orderMethodCode,
+        ?string $captureModePos,
+        bool $expectedResult
     ) {
-        $paymentMethodInstanceMock = $this->createMock(MethodInterface::class);
-
-        $this->orderPaymentMock->method('getMethodInstance')->willReturn($paymentMethodInstanceMock);
-
         $this->orderMock->method('getStoreId')->willReturn(1);
         $this->orderMock->method('getPayment')->willReturn($this->orderPaymentMock);
+        $this->orderPaymentMock->method('getMethod')->willReturn($orderMethodCode);
 
-        $this->configHelper->method('getConfigData')->willReturnMap([
-            ['capture_mode', 'adyen_abstract', '1', false, $captureMode],
-            ['sepa_flow', 'adyen_abstract', '1', false, $sepaFlow],
-            ['paypal_capture_mode', 'adyen_abstract', '1', false, $manualCapturePayPal],
-            [PaymentMethods::CONFIG_FIELD_IS_OPEN_INVOICE, null, null, null]
-        ]);
+        $this->dataHelper->method('getCcTypesAltData')->willReturn(['visa' => ['manual_capture' => 1]]);
 
-        $this->configHelper->expects($this->any())
-            ->method('getAutoCaptureOpenInvoice')
-            ->with( '1')
-            ->willReturn($autoCaptureOpenInvoice);
+        if (isset($webhookMethodCode)) {
+            $webhookMethodInstance = $this->createMock(MethodInterface::class);
+            $webhookMethodInstance->method('getCode')->willReturn($webhookMethodCode);
+            $webhookMethodInstance->method('getConfigData')->willReturnMap([
+                ['supports_manual_capture', null, true],
+                [PaymentMethods::CONFIG_FIELD_IS_OPEN_INVOICE, null, $isOpenInvoice],
+                ['is_wallet', null, false]
+            ]);
 
-        // Configure the mock to return the method name
-        $this->orderPaymentMock->method('getMethod')
-            ->willReturn($paymentCode);
+            $txVariantMock = $this->createMock(TxVariant::class);
+            $txVariantMock->method('getMethodInstance')->willReturn($webhookMethodInstance);
+            $txVariantMock->method('getCard')->willReturn(null);
+        } else {
+            // The tx variant cannot be resolved into a payment method instance.
+            $txVariantMock = null;
+        }
 
-        // Configure the order mock to return the payment mock
-        $this->orderMock->expects($this->any())
-            ->method('getPayment')
-            ->willReturn($this->orderPaymentMock);
+        $this->txVariantFactory->method('create')
+            ->with(['txVariant' => $webhookPaymentMethod])
+            ->willReturn($txVariantMock);
 
-        $result = $this->helper->isAutoCapture($this->orderMock, $paymentCode);
+        $this->configHelper->method('getCaptureMode')->with(1)->willReturn($captureMode);
+        $this->configHelper->method('getSepaFlow')->with(1)->willReturn($sepaFlow);
+        $this->configHelper->method('isPaypalManualCapture')->with(1)->willReturn($isPaypalManualCapture);
+        $this->configHelper->method('getAutoCaptureOpenInvoice')->with(1)->willReturn($autoCaptureOpenInvoice);
+        $this->configHelper->method('getAdyenPosCloudConfigData')
+            ->with('capture_mode_pos', 1)
+            ->willReturn($captureModePos);
+
+        $result = $this->helper->isAutoCapture($this->orderMock, $webhookPaymentMethod);
 
         $this->assertEquals($expectedResult, $result);
     }
@@ -408,14 +465,66 @@ class PaymentMethodsTest extends AbstractAdyenTestCase
     public static function autoCaptureDataProvider(): array
     {
         return [
-            // Manual capture supported, capture mode manual, sepa flow not authcap
-            [true, 'manual', 'notauthcap', 'paypal', true, null, true],
-            // Manual capture supported, capture mode auto
-            [true, 'auto', '', 'sepadirectdebit', true, null, true],
-            // Manual capture supported open invoice
-            [true, 'manual', '', 'klarna', false, null, true],
-            // Manual capture not supported
-            [false, '', '', 'sepadirectdebit', true, null, true]
+            'SEPA sale overrides global manual capture' => [
+                'sepadirectdebit', PaymentMethods::ADYEN_SEPADIRECTDEBIT, false,
+                CaptureMode::CAPTURE_MODE_MANUAL, SepaFlow::SEPA_FLOW_SALE,
+                false, true, PaymentMethods::ADYEN_SEPADIRECTDEBIT, null, true
+            ],
+            'SEPA authcap overrides global auto capture' => [
+                'sepadirectdebit', PaymentMethods::ADYEN_SEPADIRECTDEBIT, false,
+                CaptureMode::CAPTURE_MODE_AUTO, SepaFlow::SEPA_FLOW_AUTHCAP,
+                false, true, PaymentMethods::ADYEN_SEPADIRECTDEBIT, null, false
+            ],
+            'PayPal auto capture overrides global manual capture' => [
+                'paypal', PaymentMethods::ADYEN_PAYPAL, false,
+                CaptureMode::CAPTURE_MODE_MANUAL, SepaFlow::SEPA_FLOW_AUTHCAP,
+                false, true, PaymentMethods::ADYEN_PAYPAL, null, true
+            ],
+            'PayPal manual capture overrides global auto capture' => [
+                'paypal', PaymentMethods::ADYEN_PAYPAL, false,
+                CaptureMode::CAPTURE_MODE_AUTO, SepaFlow::SEPA_FLOW_AUTHCAP,
+                true, true, PaymentMethods::ADYEN_PAYPAL, null, false
+            ],
+            'Open invoice auto capture overrides global manual capture' => [
+                'klarna', 'adyen_klarna', true,
+                CaptureMode::CAPTURE_MODE_MANUAL, SepaFlow::SEPA_FLOW_AUTHCAP,
+                false, true, 'adyen_klarna', null, true
+            ],
+            'Open invoice manual capture overrides global auto capture' => [
+                'klarna', 'adyen_klarna', true,
+                CaptureMode::CAPTURE_MODE_AUTO, SepaFlow::SEPA_FLOW_AUTHCAP,
+                false, false, 'adyen_klarna', null, false
+            ],
+            'Other payment methods follow global manual capture' => [
+                'twint', 'adyen_twint', false,
+                CaptureMode::CAPTURE_MODE_MANUAL, SepaFlow::SEPA_FLOW_AUTHCAP,
+                false, true, 'adyen_twint', null, false
+            ],
+            'Other payment methods follow global auto capture' => [
+                'twint', 'adyen_twint', false,
+                CaptureMode::CAPTURE_MODE_AUTO, SepaFlow::SEPA_FLOW_AUTHCAP,
+                false, true, 'adyen_twint', null, true
+            ],
+            'POS auto capture overrides global manual capture' => [
+                'twint', 'adyen_twint', false,
+                CaptureMode::CAPTURE_MODE_MANUAL, SepaFlow::SEPA_FLOW_AUTHCAP,
+                false, true, AdyenPosCloudConfigProvider::CODE, CaptureMode::CAPTURE_MODE_AUTO, true
+            ],
+            'POS manual capture overrides global auto capture' => [
+                'twint', 'adyen_twint', false,
+                CaptureMode::CAPTURE_MODE_AUTO, SepaFlow::SEPA_FLOW_AUTHCAP,
+                false, true, AdyenPosCloudConfigProvider::CODE, CaptureMode::CAPTURE_MODE_MANUAL, false
+            ],
+            'Unresolved tx variant follows global manual capture' => [
+                'visa', null, false,
+                CaptureMode::CAPTURE_MODE_MANUAL, SepaFlow::SEPA_FLOW_AUTHCAP,
+                false, true, PaymentMethods::ADYEN_CC, null, false
+            ],
+            'Unresolved tx variant follows global auto capture' => [
+                'visa', null, false,
+                CaptureMode::CAPTURE_MODE_AUTO, SepaFlow::SEPA_FLOW_AUTHCAP,
+                false, true, PaymentMethods::ADYEN_CC, null, true
+            ]
         ];
     }
 
@@ -461,9 +570,7 @@ class PaymentMethodsTest extends AbstractAdyenTestCase
         $this->assertEquals('underpaid_status', $status);
     }
 
-    /**
-     * @dataProvider comparePaymentMethodProvider
-     */
+    #[DataProvider('comparePaymentMethodProvider')]
     public function testCompareOrderAndWebhookPaymentMethods(
         $orderPaymentMethod,
         $notificationPaymentMethod,
@@ -508,6 +615,21 @@ class PaymentMethodsTest extends AbstractAdyenTestCase
                 'orderPaymentMethod' => 'adyen_klarna',
                 'notificationPaymentMethod' => 'boleto',
                 'assert' => false
+            ],
+            [
+                'orderPaymentMethod' => 'adyen_paybybank_ais_dd',
+                'notificationPaymentMethod' => 'paybybank_AIS_DD',
+                'assert' => true
+            ],
+            [
+                'orderPaymentMethod' => 'adyen_afterpaytouch_US',
+                'notificationPaymentMethod' => 'afterpaytouch_US',
+                'assert' => true
+            ],
+            [
+                'orderPaymentMethod' => 'adyen_paybybank_ais_dd',
+                'notificationPaymentMethod' => 'paybybank',
+                'assert' => false
             ]
         ];
     }
@@ -545,7 +667,10 @@ class PaymentMethodsTest extends AbstractAdyenTestCase
             $this->searchCriteriaBuilder,
             $this->localeHelper,
             $this->generateShopperConversionId,
-            $this->checkoutSession
+            $this->checkoutSession,
+            $this->requestInterfaceMock,
+            $this->txVariantFactory,
+            $this->addressHelper
         );
 
 
@@ -710,6 +835,38 @@ class PaymentMethodsTest extends AbstractAdyenTestCase
         $this->assertEquals($expected, $result);
     }
 
+    public function testGetPaymentMethodsRequestMapsCountryCode()
+    {
+        $merchantAccount = 'TestMerchant';
+        $shopperLocale = 'en_US';
+        $currencyCode = 'EUR';
+
+        $this->amountCurrencyMock->method('getCurrencyCode')->willReturn($currencyCode);
+        $this->amountCurrencyMock->method('getAmount')->willReturn(100);
+        $this->chargedCurrencyMock->method('getQuoteAmountCurrency')->willReturn($this->amountCurrencyMock);
+
+        $this->localeHelper->method('getCurrentLocaleCode')->willReturn($shopperLocale);
+
+        // Kosovo (XK) must be mapped to the Adyen country code (QZ)
+        $this->invokeMethod($this->helper, 'setQuote', [$this->quoteMock]);
+
+        $getPaymentMethodsRequest = $this->getPrivateMethod(PaymentMethods::class, 'getPaymentMethodsRequest');
+
+        $storeMock = $this->createMock(\Magento\Store\Model\Store::class);
+        $storeMock->method('getCode')->willReturn('default');
+
+        $result = $getPaymentMethodsRequest->invoke(
+            $this->helper,
+            $merchantAccount,
+            $storeMock,
+            $this->quoteMock,
+            $shopperLocale,
+            'XK'
+        );
+
+        $this->assertSame('QZ', $result['countryCode']);
+    }
+
     /**
      * @throws ReflectionExceptionAlias
      */
@@ -717,7 +874,6 @@ class PaymentMethodsTest extends AbstractAdyenTestCase
     {
         $reflectionClass = new ReflectionClass($className);
         $method = $reflectionClass->getMethod($methodName);
-        $method->setAccessible(true);
         return $method;
     }
 
@@ -806,7 +962,7 @@ class PaymentMethodsTest extends AbstractAdyenTestCase
 
         $this->repositoryMock->method('createAsset')->willReturn($asset);
 
-        $this->sourceMock->method('findSource')->will($this->onConsecutiveCalls(false, true)); // SVG not found, PNG found
+        $this->sourceMock->method('findSource')->willReturn(false, true); // SVG not found, PNG found
 
         $result = $this->helper->buildPaymentMethodIcon('scheme', []);
         $this->assertStringContainsString('.png', $result['url']);
@@ -943,4 +1099,170 @@ class PaymentMethodsTest extends AbstractAdyenTestCase
         $this->assertSame(10000, $result['amount']['value']);
     }
 
+    public function testGetApiResponseFetchesAndCachesWhenEmpty(): void
+    {
+        $quoteId = 123;
+        $countryId = 'NL';
+        $channel = 'Web';
+        $apiResponse = '{"paymentMethods":"from-api"}';
+
+        // Create a mocked version of SUT to mock `getPaymentMethods()` method.
+        $helper = $this->getMockBuilder(PaymentMethods::class)
+            ->setConstructorArgs([
+                $this->createMock(Context::class),
+                $this->cartRepository,
+                $this->config,
+                $this->dataHelper,
+                $this->createMock(AdyenLogger::class),
+                $this->repositoryMock,
+                $this->sourceMock,
+                $this->createMock(DesignInterface::class),
+                $this->createMock(ThemeProviderInterface::class),
+                $this->chargedCurrencyMock,
+                $this->configHelper,
+                $this->magentoDataHelper,
+                $this->serializer,
+                $this->paymentTokenRepositoryInterface,
+                $this->searchCriteriaBuilder,
+                $this->localeHelper,
+                $this->generateShopperConversionId,
+                $this->checkoutSession,
+                $this->requestInterfaceMock,
+                $this->txVariantFactory,
+                $this->addressHelper
+            ])
+            ->onlyMethods(['getPaymentMethods'])
+            ->getMock();
+
+        $billingAddressMock = $this->createMock(AddressInterface::class);
+        $billingAddressMock->expects($this->once())
+            ->method('getCountryId')
+            ->willReturn($countryId);
+
+        $quoteMock = $this->createMock(CartInterface::class);
+        $quoteMock->expects($this->once())
+            ->method('getId')
+            ->willReturn($quoteId);
+        $quoteMock->expects($this->once())
+            ->method('getBillingAddress')
+            ->willReturn($billingAddressMock);
+
+        $this->requestInterfaceMock->expects($this->once())
+            ->method('getParam')
+            ->with('channel')
+            ->willReturn($channel);
+
+        $helper->expects($this->once())
+            ->method('getPaymentMethods')
+            ->with($quoteId, $countryId, null, $channel)
+            ->willReturn($apiResponse);
+
+        $result = $helper->getApiResponse($quoteMock);
+        $this->assertSame($apiResponse, $result);
+
+        $reflection = new ReflectionClass($helper);
+        $property = $reflection->getProperty('paymentMethodsApiResponse');
+        $this->assertSame($apiResponse, $property->getValue($helper));
+    }
+
+    public function testGetApiResponseReturnsCachedWhenAlreadySet(): void
+    {
+        $cached = '{"paymentMethods":"cached"}';
+
+        // Create a mocked version of SUT to mock `getPaymentMethods()` method.
+        $helper = $this->getMockBuilder(PaymentMethods::class)
+            ->setConstructorArgs([
+                $this->createMock(Context::class),
+                $this->cartRepository,
+                $this->config,
+                $this->dataHelper,
+                $this->createMock(AdyenLogger::class),
+                $this->repositoryMock,
+                $this->sourceMock,
+                $this->createMock(DesignInterface::class),
+                $this->createMock(ThemeProviderInterface::class),
+                $this->chargedCurrencyMock,
+                $this->configHelper,
+                $this->magentoDataHelper,
+                $this->serializer,
+                $this->paymentTokenRepositoryInterface,
+                $this->searchCriteriaBuilder,
+                $this->localeHelper,
+                $this->generateShopperConversionId,
+                $this->checkoutSession,
+                $this->requestInterfaceMock,
+                $this->txVariantFactory,
+                $this->addressHelper
+            ])
+            ->onlyMethods(['getPaymentMethods'])
+            ->getMock();
+
+        $reflection = new ReflectionClass($helper);
+        $property = $reflection->getProperty('paymentMethodsApiResponse');
+        $property->setValue($helper, $cached);
+
+        $this->requestInterfaceMock->expects($this->never())
+            ->method('getParam');
+        $helper->expects($this->never())
+            ->method('getPaymentMethods');
+
+        $quoteMock = $this->createMock(CartInterface::class);
+        $result = $helper->getApiResponse($quoteMock);
+
+        $this->assertSame($cached, $result);
+    }
+
+    public function testApplyPaymentMethodTitleOverridesReplacesMatchingNames(): void
+    {
+        $overrides = ['scheme' => 'Kreditkarte', 'klarna' => 'Pay Later'];
+
+        $this->configHelper->method('getPaymentMethodTitleOverrides')
+            ->with(1)
+            ->willReturn($overrides);
+
+        $paymentMethods = [
+            ['type' => 'scheme', 'name' => 'Cards'],
+            ['type' => 'klarna', 'name' => 'Klarna'],
+            ['type' => 'ideal',  'name' => 'iDEAL'],
+        ];
+
+        $result = $this->invokeMethod($this->helper, 'applyPaymentMethodTitleOverrides', [$paymentMethods, 1]);
+
+        $this->assertSame('Kreditkarte', $result[0]['name']);
+        $this->assertSame('Pay Later',   $result[1]['name']);
+        $this->assertSame('iDEAL',       $result[2]['name']);
+    }
+
+    public function testApplyPaymentMethodTitleOverridesReturnUnchangedWhenNoOverrides(): void
+    {
+        $this->configHelper->method('getPaymentMethodTitleOverrides')
+            ->with(1)
+            ->willReturn([]);
+
+        $paymentMethods = [
+            ['type' => 'scheme', 'name' => 'Cards'],
+            ['type' => 'ideal',  'name' => 'iDEAL'],
+        ];
+
+        $result = $this->invokeMethod($this->helper, 'applyPaymentMethodTitleOverrides', [$paymentMethods, 1]);
+
+        $this->assertSame('Cards', $result[0]['name']);
+        $this->assertSame('iDEAL', $result[1]['name']);
+    }
+
+    public function testApplyPaymentMethodTitleOverridesIgnoresMethodsWithoutType(): void
+    {
+        $this->configHelper->method('getPaymentMethodTitleOverrides')
+            ->willReturn(['scheme' => 'Kreditkarte']);
+
+        $paymentMethods = [
+            ['name' => 'No Type Method'],
+            ['type' => 'scheme', 'name' => 'Cards'],
+        ];
+
+        $result = $this->invokeMethod($this->helper, 'applyPaymentMethodTitleOverrides', [$paymentMethods, 1]);
+
+        $this->assertSame('No Type Method', $result[0]['name']);
+        $this->assertSame('Kreditkarte',    $result[1]['name']);
+    }
 }

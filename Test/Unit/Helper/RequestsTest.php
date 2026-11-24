@@ -9,6 +9,7 @@ use Adyen\Payment\Helper\Address;
 use Adyen\Payment\Helper\ChargedCurrency;
 use Adyen\Payment\Helper\Config;
 use Adyen\Payment\Helper\Data;
+use Adyen\Payment\Helper\DonationsHelper;
 use Adyen\Payment\Helper\Locale;
 use Adyen\Payment\Helper\PaymentMethods;
 use Adyen\Payment\Helper\Requests;
@@ -27,8 +28,10 @@ use Magento\Sales\Model\Order\Payment;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\MockObject\Exception;
+use PHPUnit\Framework\Attributes\AllowMockObjectsWithoutExpectations;
 
 #[CoversClass(Requests::class)]
+#[AllowMockObjectsWithoutExpectations]
 class RequestsTest extends AbstractAdyenTestCase
 {
     private Requests $requests;
@@ -43,6 +46,7 @@ class RequestsTest extends AbstractAdyenTestCase
     private Locale $localeHelper;
     private Context $context;
     private CustomerRepositoryInterface $customerRepository;
+    private DonationsHelper $donationsHelper;
 
     protected function setUp(): void
     {
@@ -59,6 +63,7 @@ class RequestsTest extends AbstractAdyenTestCase
         $this->localeHelper         = $this->createMock(Locale::class);
         $this->context              = $this->createMock(Context::class);
         $this->customerRepository   = $this->createMock(CustomerRepositoryInterface::class);
+        $this->donationsHelper      = $this->createMock(DonationsHelper::class);
 
         // AbstractHelper uses $this->_request via Context::getRequest()
         $this->context->method('getRequest')->willReturn($this->request);
@@ -73,7 +78,8 @@ class RequestsTest extends AbstractAdyenTestCase
             $this->chargedCurrency,
             $this->paymentMethodsHelper,
             $this->localeHelper,
-            $this->customerRepository
+            $this->customerRepository,
+            $this->donationsHelper
         );
     }
 
@@ -253,26 +259,6 @@ class RequestsTest extends AbstractAdyenTestCase
         $this->assertSame('card', $result['recurringProcessingModel']);
     }
 
-    #[Test]
-    public function buildAdyenTokenizedRecurringDataForStoredCard(): void
-    {
-        $payment = $this->createMock(Payment::class);
-        $payment->method('getAdditionalInformation')->willReturnMap([
-            ['recurringProcessingModel', 'card'],
-            ['cc_type', 'visa'],
-            ['method', 'scheme'],
-        ]);
-
-        $this->vaultHelper
-            ->method('getPaymentMethodRecurringProcessingModel')
-            ->with(AdyenCcConfigProvider::CODE, 1)
-            ->willReturn('card');
-
-        $result = $this->requests->buildAdyenTokenizedPaymentRecurringData(1, $payment);
-
-        $this->assertSame('card', $result['recurringProcessingModel']);
-    }
-
     public static function buildDonationDataReturnsCorrectStructureDataProvider(): array
     {
         return [
@@ -304,39 +290,28 @@ class RequestsTest extends AbstractAdyenTestCase
     }
 
     /**
-     * @dataProvider buildDonationDataReturnsCorrectStructureDataProvider
-     *
-     * @param string $method
-     * @param string $variant
-     * @param string $convertedMethod
-     * @param bool $isAlternativePaymentMethod
      * @return void
      * @throws AdyenException
      * @throws Exception
      * @throws LocalizedException
      */
-    public function testBuildDonationDataReturnsCorrectStructure(
-        string $method,
-        string $variant,
-        string $convertedMethod,
-        bool $isAlternativePaymentMethod
-    ): void {
+    public function testBuildDonationDataReturnsCorrectStructure(): void {
         $storeId   = 1;
         $currency  = 'EUR';
         $amount    = ['currency' => $currency, 'value' => 1000];
         $returnUrl = 'https://example.com';
         $payload   = ['amount' => $amount, 'returnUrl' => $returnUrl];
 
+        $campaignAmounts = ['type' => 'fixedAmounts', 'currency' => $currency, 'values' => [500, 1000]];
+
         $payment = $this->createMock(Payment::class);
         $order = $this->createMock(Order::class);
-        $paymentMethodInstance = $this->createMock(MethodInterface::class);
 
         $payment->method('getOrder')->willReturn($order);
-        $payment->method('getMethodInstance')->willReturn($paymentMethodInstance);
-        $payment->method('getMethod')->willReturn($method);
         $payment->method('getAdditionalInformation')->willReturnMap([
             ['donationToken', 'donation-token'],
             ['donationCampaignId', 'campaign-id'],
+            ['donationCampaignAmounts', $campaignAmounts],
             ['pspReference', 'psp-ref-123'],
             ['donationPayload', $payload],
         ]);
@@ -346,17 +321,16 @@ class RequestsTest extends AbstractAdyenTestCase
 
         $amountCurrency = $this->createConfiguredMock(AdyenAmountCurrency::class, [
             'getCurrencyCode' => $currency,
+            'getAmount' => 39.37
         ]);
 
         $this->chargedCurrency->method('getOrderAmountCurrency')->willReturn($amountCurrency);
-        $this->paymentMethodsHelper->method('isAlternativePaymentMethod')
-            ->willReturn($isAlternativePaymentMethod);
+        $this->adyenHelper->method('formatAmount')->with(39.37, $currency)->willReturn(3937);
 
-        if ($isAlternativePaymentMethod) {
-            $this->paymentMethodsHelper->method('getAlternativePaymentMethodTxVariant')
-                ->with($paymentMethodInstance)
-                ->willReturn($variant);
-        }
+        $this->donationsHelper->expects($this->once())
+            ->method('isDonationAmountValid')
+            ->with($campaignAmounts, $amount, 3937)
+            ->willReturn(true);
 
         $this->adyenHelper->method('getAdyenMerchantAccount')
             ->with('adyen_giving', $storeId)
@@ -365,7 +339,6 @@ class RequestsTest extends AbstractAdyenTestCase
 
         $result = $this->requests->buildDonationData($payment, $storeId);
 
-        $this->assertSame($convertedMethod, $result['paymentMethod']['type']);
         $this->assertSame('user_42', $result['shopperReference']);
         $this->assertSame('donation-token', $result['donationToken']);
         $this->assertSame('campaign-id', $result['donationCampaignId']);
@@ -404,7 +377,6 @@ class RequestsTest extends AbstractAdyenTestCase
         $payload = ['amount' => ['currency' => 'USD']];
 
         $payment->method('getOrder')->willReturn($order);
-        $payment->method('getMethod')->willReturn('scheme');
         $payment->method('getMethodInstance')->willReturn(
             $this->createStub(MethodInterface::class)
         );
@@ -423,6 +395,44 @@ class RequestsTest extends AbstractAdyenTestCase
                     'getCurrencyCode' => 'EUR',
                 ])
             );
+
+        $this->donationsHelper->expects($this->never())->method('isDonationAmountValid');
+
+        $this->requests->buildDonationData($payment, 1);
+    }
+
+    #[Test]
+    public function buildDonationDataThrowsExceptionIfAmountIsNotPermittedByCampaign(): void
+    {
+        $this->expectException(LocalizedException::class);
+        $this->expectExceptionMessage('Donation failed!');
+
+        $payment = $this->createMock(Payment::class);
+        $order = $this->createMock(Order::class);
+        $payload = [
+            'amount' => ['currency' => 'EUR', 'value' => 123456],
+            'returnUrl' => 'https://example.com'
+        ];
+
+        $payment->method('getOrder')->willReturn($order);
+        $payment->method('getAdditionalInformation')->willReturnMap([
+            ['donationToken', 'valid-token'],
+            ['donationPayload', $payload],
+            ['donationCampaignId', 'campaign-id'],
+            ['donationCampaignAmounts', ['type' => 'fixedAmounts', 'currency' => 'EUR', 'values' => [100]]],
+            ['pspReference', 'psp-ref-123'],
+        ]);
+
+        $this->chargedCurrency->method('getOrderAmountCurrency')->willReturn(
+            $this->createConfiguredMock(AdyenAmountCurrency::class, [
+                'getCurrencyCode' => 'EUR',
+                'getAmount' => 39.00
+            ])
+        );
+
+        $this->adyenHelper->method('formatAmount')->with(39.00, 'EUR')->willReturn(3900);
+        $this->donationsHelper->method('isDonationAmountValid')->willReturn(false);
+        $this->adyenHelper->expects($this->never())->method('getAdyenMerchantAccount');
 
         $this->requests->buildDonationData($payment, 1);
     }

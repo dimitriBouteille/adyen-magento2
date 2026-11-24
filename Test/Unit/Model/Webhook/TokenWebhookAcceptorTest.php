@@ -21,7 +21,9 @@ use Magento\Sales\Model\Order;
 use Magento\Sales\Model\Order\Payment;
 use PHPUnit\Framework\MockObject\Exception;
 use PHPUnit\Framework\MockObject\MockObject;
+use PHPUnit\Framework\Attributes\AllowMockObjectsWithoutExpectations;
 
+#[AllowMockObjectsWithoutExpectations]
 class TokenWebhookAcceptorTest extends AbstractAdyenTestCase
 {
     protected ?TokenWebhookAcceptor $acceptor = null;
@@ -66,13 +68,6 @@ class TokenWebhookAcceptorTest extends AbstractAdyenTestCase
 
         $this->serializerMock->method('serialize')
             ->willReturn(json_encode(['shopperReference' => '001']));
-
-        $this->configHelperMock->method('getNotificationsHmacKey')
-            ->willReturn(self::HMAC_KEY);
-
-        $this->httpRequestMock->method('getHeader')
-            ->with('hmacsignature')
-            ->willReturn(self::HMAC_SIGNATURE);
 
         $this->acceptor = new TokenWebhookAcceptor(
             $this->notificationFactoryMock,
@@ -190,24 +185,33 @@ class TokenWebhookAcceptorTest extends AbstractAdyenTestCase
     {
         $this->expectException(AuthenticationException::class);
 
+        $this->httpRequestMock->method('getHeader')
+            ->with('hmacsignature')
+            ->willReturn(self::HMAC_SIGNATURE);
+
         $payload = $this->getValidPayload();
         // Mutate payload so the precomputed signature no longer matches
         $payload['data']['storedPaymentMethodId'] = 'alternative_psp';
 
-        $notification = $this->createMock(Notification::class);
-        $notification->method('isDuplicate')->willReturn(false);
-        $this->notificationFactoryMock->method('create')->willReturn($notification);
-
-        $this->notificationReceiverMock
-            ->method('validateNotificationMode')
-            ->willReturn(true);
-
         $this->configHelperMock->method('isDemoMode')->willReturn(true);
-        $this->configHelperMock->method('getNotificationsHmacKey')->willReturn('mock_hmac_key');
+        $this->configHelperMock->method('getNotificationsHmacKey')->willReturn(self::HMAC_KEY);
 
         $this->adyenLoggerMock->expects($this->once())->method('addAdyenNotification');
-
         $this->acceptor->getNotifications($payload);
+    }
+
+    public function testValidateThrowsInvalidDataExceptionWithMissingHmacSignature(): void
+    {
+        $this->expectException(InvalidDataException::class);
+
+        $this->httpRequestMock->method('getHeader')
+            ->with('hmacsignature')
+            ->willReturn(false);
+
+        $this->configHelperMock->method('isDemoMode')->willReturn(true);
+        $this->configHelperMock->method('getNotificationsHmacKey')->willReturn(self::HMAC_KEY);
+
+        $this->acceptor->getNotifications($this->getValidPayload());
     }
 
     public function testLogsAndContinuesWhenPaymentLoadThrows(): void

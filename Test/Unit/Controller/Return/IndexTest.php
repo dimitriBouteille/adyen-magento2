@@ -10,24 +10,27 @@ use Adyen\Payment\Helper\PaymentResponseHandler;
 use Adyen\Payment\Helper\PaymentsDetails;
 use Adyen\Payment\Helper\Quote;
 use Adyen\Payment\Logger\AdyenLogger;
+use Adyen\Payment\Model\Sales\OrderRepository;
 use Adyen\Payment\Test\Unit\AbstractAdyenTestCase;
 use Exception;
 use Magento\Checkout\Model\Session;
 use Magento\Framework\App\Action\Context;
 use Magento\Framework\App\RequestInterface;
+use Magento\Framework\Exception\NoSuchEntityException;
 use Magento\Framework\Message\ManagerInterface;
 use Magento\Framework\App\Response\RedirectInterface;
 use Magento\Framework\Exception\LocalizedException;
 use Magento\Quote\Api\CartRepositoryInterface;
 use Magento\Quote\Model\Quote as QuoteModel;
-use Magento\Sales\Api\OrderRepositoryInterface;
-use Magento\Sales\Model\Order;
+use Magento\Sales\Api\Data\OrderInterface;
+use Magento\Sales\Model\Order as OrderModel;
 use Magento\Sales\Model\OrderFactory;
 use Magento\Store\Model\Store;
 use Magento\Store\Model\StoreManagerInterface;
 use PHPUnit\Framework\MockObject\MockObject;
-use PHPUnit\Framework\TestCase;
+use PHPUnit\Framework\Attributes\AllowMockObjectsWithoutExpectations;
 
+#[AllowMockObjectsWithoutExpectations]
 class IndexTest extends AbstractAdyenTestCase
 {
     private Index $indexController;
@@ -59,7 +62,7 @@ class IndexTest extends AbstractAdyenTestCase
         $this->paymentsDetailsHelper = $this->createMock(PaymentsDetails::class);
         $this->paymentResponseHandler = $this->createMock(PaymentResponseHandler::class);
         $this->cartRepository = $this->createMock(CartRepositoryInterface::class);
-        $this->orderRepository = $this->createMock(OrderRepositoryInterface::class);
+        $this->orderRepository = $this->createMock(OrderRepository::class);
 
         $this->request = $this->createMock(RequestInterface::class);
         $this->response = $this->createMock(RedirectInterface::class);
@@ -107,15 +110,18 @@ class IndexTest extends AbstractAdyenTestCase
         $quote->expects($this->once())->method('setIsActive')->with(false);
         $this->session->method('getQuote')->willReturn($quote);
 
-        $order = $this->createMock(Order::class);
-        $order->method('getId')->willReturn(1);
+        $order = $this->createMock(OrderInterface::class);
         $order->method('getIncrementId')->willReturn('1001');
-        $order->method('getPayment')->willReturn($this->createMock(Order\Payment::class));
+        $order->method('getPayment')->willReturn($this->createMock(OrderModel\Payment::class));
+        $order->method('getEntityId')->willReturn(1);
+        $order->method('getStoreId')->willReturn(1);
 
-        $orderModel = $this->createMock(Order::class);
-        $orderModel->method('loadByIncrementId')->willReturn($order);
-        $orderModel->method('getId')->willReturn(1);
+        $orderModel = $this->createMock(OrderModel::class);
+        $orderModel->method('getEntityId')->willReturn(1);
+        $orderModel->method('loadByIncrementId')->willReturn($orderModel);
+
         $this->orderFactory->method('create')->willReturn($orderModel);
+        $this->orderRepository->method('get')->willReturn($order);
 
         $this->paymentsDetailsHelper->method('initiatePaymentDetails')->willReturn(['resultCode' => 'Authorised']);
         $this->paymentResponseHandler->method('handlePaymentsDetailsResponse')->willReturn(true);
@@ -139,12 +145,15 @@ class IndexTest extends AbstractAdyenTestCase
                 ['return_path', 1, 'checkout/cart']
             ]);
 
-        $order = $this->createMock(Order::class);
-        $order->method('getId')->willReturn(1);
+        $order = $this->createMock(OrderInterface::class);
+        $order->method('getStoreId')->willReturn(1);
 
-        $orderModel = $this->createMock(Order::class);
-        $orderModel->method('loadByIncrementId')->willReturn($order);
+        $orderModel = $this->createMock(OrderModel::class);
+        $orderModel->method('getEntityId')->willReturn(1);
+        $orderModel->method('loadByIncrementId')->willReturn($orderModel);
+
         $this->orderFactory->method('create')->willReturn($orderModel);
+        $this->orderRepository->method('get')->willReturn($order);
 
         $this->paymentsDetailsHelper->method('initiatePaymentDetails')->willThrowException(new Exception('Invalid'));
         $this->paymentResponseHandler->method('handlePaymentsDetailsResponse')->willReturn(false);
@@ -155,6 +164,48 @@ class IndexTest extends AbstractAdyenTestCase
         $this->indexController->expects($this->once())
             ->method('_redirect')
             ->with('checkout/cart');
+
+        $this->indexController->execute();
+    }
+
+    public function testExecuteUsesOrderStoreIdForRedirectConfig(): void
+    {
+        // Current store context differs from the store where the order was placed.
+        $orderStoreId = 2;
+
+        $params = ['merchantReference' => '1001', 'redirectResult' => 'test'];
+        $this->request->method('getParams')->willReturn($params);
+        $this->quoteHelper->method('getIsQuoteMultiShippingWithMerchantReference')->willReturn(false);
+
+        // Config is only mapped for the order's store id (2), not the current context store id (1).
+        $this->configHelper->method('getAdyenAbstractConfigData')
+            ->willReturnMap([
+                ['custom_success_redirect_path', $orderStoreId, 'custom/success/path'],
+                ['return_path', $orderStoreId, 'checkout/cart']
+            ]);
+
+        $quote = $this->createMock(QuoteModel::class);
+        $this->session->method('getQuote')->willReturn($quote);
+
+        $order = $this->createMock(OrderInterface::class);
+        $order->method('getIncrementId')->willReturn('1001');
+        $order->method('getPayment')->willReturn($this->createMock(OrderModel\Payment::class));
+        $order->method('getEntityId')->willReturn(1);
+        $order->method('getStoreId')->willReturn($orderStoreId);
+
+        $orderModel = $this->createMock(OrderModel::class);
+        $orderModel->method('getEntityId')->willReturn(1);
+        $orderModel->method('loadByIncrementId')->willReturn($orderModel);
+
+        $this->orderFactory->method('create')->willReturn($orderModel);
+        $this->orderRepository->method('get')->willReturn($order);
+
+        $this->paymentsDetailsHelper->method('initiatePaymentDetails')->willReturn(['resultCode' => 'Authorised']);
+        $this->paymentResponseHandler->method('handlePaymentsDetailsResponse')->willReturn(true);
+
+        $this->indexController->expects($this->once())
+            ->method('_redirect')
+            ->with('custom/success/path', ['_query' => ['order_increment_id' => '1001']]);
 
         $this->indexController->execute();
     }
@@ -173,16 +224,21 @@ class IndexTest extends AbstractAdyenTestCase
 
     public function testGetOrderWithValidId(): void
     {
-        $order = $this->createMock(Order::class);
-        $order->method('getId')->willReturn(10);
-        $this->orderFactory->method('create')->willReturn($order);
-        $order->method('loadByIncrementId')->with('1001')->willReturn($order);
+        $orderModel = $this->createMock(OrderModel::class);
+        $orderModel->method('getEntityId')->willReturn(10);
+        $orderModel->method('loadByIncrementId')->willReturn($orderModel);
+
+        $this->orderFactory->method('create')->willReturn($orderModel);
+
+        $order = $this->createMock(OrderInterface::class);
+        $order->method('getEntityId')->willReturn(10);
+
+        $this->orderRepository->method('get')->with(10)->willReturn($order);
 
         $reflection = new \ReflectionClass(Index::class);
         $method = $reflection->getMethod('getOrder');
-        $method->setAccessible(true);
         $result = $method->invokeArgs($this->indexController, ['1001']);
-        $this->assertSame($order, $result);
+        $this->assertInstanceOf(OrderInterface::class, $result);
     }
 
     public function testGetOrderThrowsExceptionOnInvalidOrder(): void
@@ -190,14 +246,29 @@ class IndexTest extends AbstractAdyenTestCase
         $this->expectException(LocalizedException::class);
         $this->expectExceptionMessage('Order cannot be loaded');
 
-        $order = $this->createMock(Order::class);
+        $order = $this->createMock(OrderModel::class);
         $order->method('getId')->willReturn(null);
-        $this->orderFactory->method('create')->willReturn($order);
-        $order->method('loadByIncrementId')->willReturn($order);
+        $this->session->method('getLastRealOrder')->willReturn($order);
 
         $reflection = new \ReflectionClass(Index::class);
         $method = $reflection->getMethod('getOrder');
-        $method->setAccessible(true);
+        $method->invokeArgs($this->indexController, [null]);
+
+    }
+
+    public function testGetOrderDoesNotTranslateIntoAnOrderWithValidIncrementId(): void
+    {
+        $this->expectException(LocalizedException::class);
+        $this->expectExceptionMessage('Order cannot be loaded');
+
+        $orderModel = $this->createMock(OrderModel::class);
+        $orderModel->method('loadByIncrementId')->willReturnSelf();
+        $orderModel->method('getEntityId')->willReturn(null);
+
+        $this->orderFactory->method('create')->willReturn($orderModel);
+
+        $reflection = new \ReflectionClass(Index::class);
+        $method = $reflection->getMethod('getOrder');
         $method->invokeArgs($this->indexController, ['1001']);
 
     }

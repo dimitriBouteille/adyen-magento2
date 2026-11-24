@@ -17,6 +17,7 @@ use Adyen\Payment\Api\Repository\AdyenNotificationRepositoryInterface;
 use Adyen\Payment\Helper\AdyenOrderPayment;
 use Adyen\Payment\Helper\CaseManagement;
 use Adyen\Payment\Helper\Config;
+use Adyen\Payment\Helper\Data;
 use Adyen\Payment\Helper\Invoice;
 use Adyen\Payment\Helper\Order as OrderHelper;
 use Adyen\Payment\Helper\PaymentMethods;
@@ -43,6 +44,7 @@ class AuthorisationWebhookHandler implements WebhookHandlerInterface
      * @param CartRepositoryInterface $cartRepository
      * @param AdyenNotificationRepositoryInterface $notificationRepository
      * @param CleanupAdditionalInformationInterface $cleanupAdditionalInformation
+     * @param Data $adyenHelper
      */
     public function __construct(
         private readonly AdyenOrderPayment $adyenOrderPaymentHelper,
@@ -55,7 +57,8 @@ class AuthorisationWebhookHandler implements WebhookHandlerInterface
         private readonly PaymentMethods $paymentMethodsHelper,
         private readonly CartRepositoryInterface $cartRepository,
         private readonly AdyenNotificationRepositoryInterface $notificationRepository,
-        private readonly CleanupAdditionalInformationInterface $cleanupAdditionalInformation
+        private readonly CleanupAdditionalInformationInterface $cleanupAdditionalInformation,
+        private readonly Data $adyenHelper
     ) { }
 
     /**
@@ -84,59 +87,108 @@ class AuthorisationWebhookHandler implements WebhookHandlerInterface
      */
     private function handleSuccessfulAuthorisation(Order $order, Notification $notification): Order
     {
-        $isAutoCapture = $this->paymentMethodsHelper->isAutoCapture($order, $notification->getPaymentMethod());
+        $paymentMethod = (string) $notification->getPaymentMethod();
+        $isAutoCapture = $this->paymentMethodsHelper->isAutoCapture($order, $paymentMethod);
 
+        $this->markPaymentCapturedIfNeeded($order, $notification, $isAutoCapture);
+
+        $this->adyenOrderPaymentHelper->createAdyenOrderPayment($order, $notification, $isAutoCapture);
+
+        $notificationAmount = floatval($this->adyenHelper->originalAmount(
+            $notification->getAmountValue(), $notification->getAmountCurrency()));
+
+        $order->setPaymentAuthorizationAmount($order->getPaymentAuthorizationAmount() + $notificationAmount);
+
+        if (!$this->adyenOrderPaymentHelper->isFullAmountAuthorized($order)) {
+            $this->orderHelper->addWebhookStatusHistoryComment($order, $notification);
+            $this->createCashShipmentIfNeeded($order, $paymentMethod);
+            $this->deactivateQuoteIfNeeded($order);
+            return $order;
+        }
+
+        $order = $this->orderHelper->setPrePaymentAuthorized($order);
+        $this->orderHelper->updatePaymentDetails($order, $notification);
+
+        $additionalData = $this->getAdditionalDataArray($notification);
+        $requireFraudManualReview = $this->caseManagementHelper->requiresManualReview($additionalData);
+
+        $isOrderAutoCapture = $this->adyenOrderPaymentHelper->isAllAutoCaptured($order);
+        $order = $isOrderAutoCapture
+            ? $this->handleAutoCapture($order, $notification, $requireFraudManualReview)
+            : $this->handleManualCapture($order, $notification, $requireFraudManualReview);
+
+        $this->sendOrderMailIfNeeded($order, $paymentMethod);
+
+        $payment = $order->getPayment();
+        $payment->setAmountAuthorized($order->getGrandTotal());
+        $payment->setBaseAmountAuthorized($order->getBaseGrandTotal());
+
+        $this->cleanupAdditionalInformation->execute($payment);
+
+        $this->createCashShipmentIfNeeded($order, $paymentMethod);
+        $this->deactivateQuoteIfNeeded($order);
+
+        return $order;
+    }
+
+    private function markPaymentCapturedIfNeeded(Order $order, Notification $notification, bool $isAutoCapture): void
+    {
         // Set adyen_notification_payment_captured to true so that we ignore a possible OFFER_CLOSED
         if ($notification->isSuccessful() && $isAutoCapture) {
             $order->setData('adyen_notification_payment_captured', 1);
         }
+    }
 
-        $this->adyenOrderPaymentHelper->createAdyenOrderPayment($order, $notification, $isAutoCapture);
-        $isFullAmountAuthorized = $this->adyenOrderPaymentHelper->isFullAmountAuthorized($order);
+    private function getAdditionalDataArray(Notification $notification): array
+    {
+        $raw = $notification->getAdditionalData();
+        return !empty($raw) ? (array) $this->serializer->unserialize($raw) : [];
+    }
 
-        if ($isFullAmountAuthorized) {
-            $order = $this->orderHelper->setPrePaymentAuthorized($order);
-            $this->orderHelper->updatePaymentDetails($order, $notification);
+    private function sendOrderMailIfNeeded(Order $order, string $paymentMethod): void
+    {
+        // For Boleto confirmation mail is sent on order creation
+        // Send order confirmation mail after invoice creation so merchant can add invoicePDF to this mail
+        if ($paymentMethod !== 'adyen_boleto' && !$order->getEmailSent()) {
+            $this->orderHelper->sendOrderMail($order);
+        }
+    }
 
-            $additionalData = !empty($notification->getAdditionalData()) ? $this->serializer->unserialize($notification->getAdditionalData()) : [];
-            $requireFraudManualReview = $this->caseManagementHelper->requiresManualReview($additionalData);
-
-            if ($isAutoCapture) {
-                $order = $this->handleAutoCapture($order, $notification, $requireFraudManualReview);
-            } else {
-                $order = $this->handleManualCapture($order, $notification, $requireFraudManualReview);
-            }
-
-            // For Boleto confirmation mail is sent on order creation
-            // Send order confirmation mail after invoice creation so merchant can add invoicePDF to this mail
-            if ($notification->getPaymentMethod() != "adyen_boleto" && !$order->getEmailSent()) {
-                $this->orderHelper->sendOrderMail($order);
-            }
-
-            // Set authorized amount in sales_order_payment
-            $order->getPayment()->setAmountAuthorized($order->getGrandTotal());
-            $order->getPayment()->setBaseAmountAuthorized($order->getBaseGrandTotal());
-
-            // Clean-up the data temporarily stored in `additional_information`
-            $this->cleanupAdditionalInformation->execute($order->getPayment());
-        } else {
-            $this->orderHelper->addWebhookStatusHistoryComment($order, $notification);
+    private function createCashShipmentIfNeeded(Order $order, string $paymentMethod): void
+    {
+        if ($paymentMethod !== 'c_cash') {
+            return;
         }
 
-        if ($notification->getPaymentMethod() == "c_cash" &&
-            $this->configHelper->getConfigData('create_shipment', 'adyen_cash', $order->getStoreId())
-        ) {
+        if ($this->configHelper->getConfigData('create_shipment', 'adyen_cash', $order->getStoreId())) {
             $this->orderHelper->createShipment($order);
         }
+    }
 
-        // Disable the quote if it's still active
-        $quote = $this->cartRepository->get($order->getQuoteId());
-        if ($quote->getIsActive()) {
-            $quote->setIsActive(false);
-            $this->cartRepository->save($quote);
+    private function deactivateQuoteIfNeeded(Order $order): void
+    {
+        $quoteId = $order->getQuoteId();
+        if (!$quoteId) {
+            // No quote associated with the order (or already cleaned up)
+            return;
         }
 
-        return $order;
+        try {
+            $quote = $this->cartRepository->get($quoteId);
+
+            if ($quote->getIsActive()) {
+                $quote->setIsActive(false);
+                $this->cartRepository->save($quote);
+            }
+        } catch (\Exception $e) {
+            $this->adyenLogger->addAdyenNotification(
+                'Quote deactivation skipped during webhook processing.',
+                [
+                    'quoteId' => $quoteId,
+                    'error' => $e->getMessage()
+                ]
+            );
+        }
     }
 
     /**

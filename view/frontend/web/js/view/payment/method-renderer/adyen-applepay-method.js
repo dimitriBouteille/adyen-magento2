@@ -40,6 +40,10 @@ define(
                 }
 
                 return applePayConfiguration;
+            },
+
+            checkBrowserCompatibility: function () {
+                return /^((?!android).)*(?:safari|firefox)/i.test(navigator.userAgent);
             }
         })
     }

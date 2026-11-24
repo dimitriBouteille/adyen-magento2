@@ -20,6 +20,7 @@ use Adyen\Payment\Model\ResourceModel\StateData\Collection;
 use Magento\Framework\Event\Observer;
 use Magento\Payment\Observer\AbstractDataAssignObserver;
 use Magento\Quote\Api\Data\PaymentInterface;
+use Magento\Vault\Api\Data\PaymentTokenInterface;
 
 class AdyenPaymentMethodDataAssignObserver extends AbstractDataAssignObserver
 {
@@ -37,6 +38,7 @@ class AdyenPaymentMethodDataAssignObserver extends AbstractDataAssignObserver
         self::RETURN_URL,
         self::RECURRING_PROCESSING_MODEL,
         self::CC_NUMBER,
+        PaymentTokenInterface::PUBLIC_HASH,
         HeaderDataBuilderInterface::ADDITIONAL_DATA_FRONTEND_TYPE_KEY
     ];
 
@@ -76,7 +78,7 @@ class AdyenPaymentMethodDataAssignObserver extends AbstractDataAssignObserver
         $paymentInfo = $this->readPaymentModelArgument($observer);
 
         // Remove the following information from the previous payment
-        $paymentInfo->unsAdditionalInformation(AdyenCcDataAssignObserver::CC_TYPE);
+        $paymentInfo->setCcType(null);
         $paymentInfo->unsAdditionalInformation(AdyenCcDataAssignObserver::COMBO_CARD_TYPE);
         $paymentInfo->unsAdditionalInformation(AdyenCcDataAssignObserver::NUMBER_OF_INSTALLMENTS);
 

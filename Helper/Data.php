@@ -54,6 +54,12 @@ class Data extends AbstractHelper
     const LIVE_AU = 'live-au';
     const LIVE_US = 'live-us';
     const LIVE_IN = 'live-in';
+    const LIVE_NEA = 'live-nea';
+
+    /**
+     * Extra keys we explicitly allow in logs besides *reference fields
+     */
+    private const LOG_ALLOWED_EXTRA_KEYS = ['uniqueTerminalIds'];
 
     /**
      * @param Context $context
@@ -106,7 +112,8 @@ class Data extends AbstractHelper
             'au' => 'AU - Australasia',
             'us' => 'US - United States',
             'in' => 'IN - India',
-            'apse' => 'APSE - Asia Pacific Southeast'
+            'apse' => 'APSE - Asia Pacific Southeast',
+            'nea' => 'NEA - North East Asia'
         ];
     }
 
@@ -252,7 +259,7 @@ class Data extends AbstractHelper
     {
         $ccTypesMapper = $this->getCcTypesAltData();
 
-        if (isset($ccTypesMapper[$ccType])) {
+        if (isset($ccType) && isset($ccTypesMapper[$ccType])) {
             $ccType = $ccTypesMapper[$ccType]['code'];
         }
 
@@ -456,12 +463,40 @@ class Data extends AbstractHelper
         $hasPlatformIntegrator = $this->configHelper->getHasPlatformIntegrator();
         $platformIntegratorName = $this->configHelper->getPlatformIntegratorName();
         $platformIntegrator = ($hasPlatformIntegrator && $platformIntegratorName) ? $platformIntegratorName : '';
-        $client->setExternalPlatform($platformData['name'], $platformData['version'], $platformIntegrator);
+        $platformName = $platformData['name'] . ' ' . $platformData['edition'];
+        $client->setExternalPlatform($platformName, $platformData['version'], $platformIntegrator);
 
         if ($isDemo) {
             $client->setEnvironment(Environment::TEST);
         } else {
             $client->setEnvironment(Environment::LIVE, $this->configHelper->getLiveEndpointPrefix($storeId));
+        }
+
+        return $client;
+    }
+
+    /**
+     * Builds an Adyen client for Terminal API usage and applies terminal specific configurations on top.
+     *
+     * @param int|null $storeId
+     * @param string $apiKey
+     * @return Client
+     * @throws AdyenException
+     * @throws NoSuchEntityException
+     */
+    public function initializeAdyenClientForPos(?int $storeId, string $apiKey): Client
+    {
+        $client = $this->initializeAdyenClient($storeId, $apiKey);
+        $isDemo = $this->configHelper->isDemoMode($storeId);
+        $timeout =  $this->configHelper->getAdyenPosCloudConfigData('total_timeout', $storeId);
+
+        if (!empty($timeout)) {
+            $client->setTimeout($timeout);
+        }
+
+        $terminalApiRegion = $this->configHelper->getTerminalApiRegion($storeId);
+        if (!$isDemo && !empty($terminalApiRegion)) {
+            $client->setRegion($terminalApiRegion);
         }
 
         return $client;
@@ -548,6 +583,8 @@ class Data extends AbstractHelper
                 return self::LIVE_US;
             case "in":
                 return self::LIVE_IN;
+            case "nea":
+                return self::LIVE_NEA;
             default:
                 return self::LIVE;
         }
@@ -605,7 +642,12 @@ class Data extends AbstractHelper
             $context['body'] = $request;
         } else {
             $context['livePrefix'] = $this->configHelper->getLiveEndpointPrefix($storeId);
-            $context['body'] = $this->filterReferences($request);
+            $filtered = $this->filterReferences($request);
+
+            // Only add body if any field survived filtering
+            if (!empty($filtered)) {
+                $context['body'] = $filtered;
+            }
         }
 
         $this->adyenLogger->addAdyenInfoLog('Request to Adyen API ' . $endpoint, $context);
@@ -619,7 +661,12 @@ class Data extends AbstractHelper
         if ($isDemo) {
             $context['body'] = $response;
         } else {
-            $context['body'] = $this->filterReferences($response);
+            $filtered = $this->filterReferences($response);
+
+            // Only add body if any field survived filtering
+            if (!empty($filtered)) {
+                $context['body'] = $filtered;
+            }
         }
 
         $this->adyenLogger->addAdyenInfoLog('Response from Adyen API', $context);
@@ -632,12 +679,16 @@ class Data extends AbstractHelper
         $responseArray['errorCode'] = $e->getAdyenErrorCode();
         $this->logResponse($responseArray);
     }
-
     private function filterReferences(array $data): array
     {
-        return array_filter($data, function($value, $key) {
-            // Keep only reference keys, e.g. reference, pspReference, merchantReference etc.
-            return false !== strpos(strtolower($key), 'reference');
+        return array_filter($data, function ($value, $key) {
+            // Keep whitelisted keys (like uniqueTerminalIds)
+            if (in_array($key, self::LOG_ALLOWED_EXTRA_KEYS, true)) {
+                return true;
+            }
+
+            // Keep only keys that contain "reference" (reference, pspReference, merchantReference, etc.)
+            return str_contains(strtolower((string)$key), 'reference');
         }, ARRAY_FILTER_USE_BOTH);
     }
 
